@@ -1,0 +1,104 @@
+name: Build Windows Bundle (with r_lib)
+
+on:
+  workflow_dispatch:
+    inputs:
+      r_version:
+        description: "R version to use (e.g., 4.4.2). Leave default unless you need a specific one."
+        required: true
+        default: "4.4.2"
+
+jobs:
+  build-windows-bundle:
+    runs-on: windows-latest
+
+    env:
+      # IMPORTANT: Set this to the folder you want to ship (the folder that should contain r_lib after build)
+      BUNDLE_DIR: "BPS Windows Desktop 1-2.0"
+
+      # Path to prep_r_lib.R (relative to repo root). Update if yours is elsewhere.
+      PREP_SCRIPT: "BPS Windows Desktop 1-2.0/_BPS_Dashboard_App_Files (do not modify)/prep_r_lib.R"
+
+      # Name of the output zip artifact
+      OUT_ZIP: "BPS_Windows_Bundle_with_r_lib.zip"
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ github.event.inputs.r_version }}
+
+      - name: Print R version
+        shell: pwsh
+        run: |
+          Rscript -e "cat('R version: ', R.version.string, '\n')"
+
+      - name: Build r_lib by running prep_r_lib.R
+        shell: pwsh
+        run: |
+          if (!(Test-Path "${env:PREP_SCRIPT}")) {
+            Write-Error "prep_r_lib.R not found at: ${env:PREP_SCRIPT}. Update PREP_SCRIPT in the workflow."
+            exit 1
+          }
+
+          # Ensure we run from repo root and script writes into the intended bundle directory structure
+          Rscript --vanilla "${env:PREP_SCRIPT}"
+
+          # Verify r_lib exists
+          $rlib = Join-Path "${env:BUNDLE_DIR}" "r_lib"
+          if (!(Test-Path $rlib)) {
+            Write-Error "r_lib was not created at: $rlib. Check prep_r_lib.R output path."
+            exit 1
+          }
+
+          Write-Host "r_lib created at: $rlib"
+          Write-Host "Top-level packages in r_lib:"
+          Get-ChildItem $rlib -Directory | Select-Object -First 20 | ForEach-Object { $_.Name }
+
+      - name: Optional smoke test (package load only)
+        shell: pwsh
+        run: |
+          $bundle = "${env:BUNDLE_DIR}"
+          $rlib   = Join-Path $bundle "r_lib"
+
+          # Try to load the big common packages from your app; edit list as you like.
+          $pkgs = @(
+            "shiny","bs4Dash","DT","dplyr","tidyr","ggplot2","plotly","readr","readxl","lubridate"
+          )
+
+          $expr = @"
+          .libPaths(c(normalizePath('$rlib', winslash='\\\\'), .libPaths()))
+          cat('LibPaths:\n'); print(.libPaths())
+          pkgs <- c(${($pkgs | ForEach-Object { "'$_'" }) -join ","})
+          ok <- sapply(pkgs, function(p) { suppressWarnings(require(p, character.only=TRUE)) })
+          cat('\nLoad results:\n'); print(ok)
+          if (any(!ok)) quit(status=2)
+          "@
+
+          Rscript --vanilla -e $expr
+
+      - name: Zip bundle folder (including r_lib)
+        shell: pwsh
+        run: |
+          if (!(Test-Path "${env:BUNDLE_DIR}")) {
+            Write-Error "Bundle directory not found: ${env:BUNDLE_DIR}. Update BUNDLE_DIR in the workflow."
+            exit 1
+          }
+
+          if (Test-Path "${env:OUT_ZIP}") {
+            Remove-Item -Force "${env:OUT_ZIP}"
+          }
+
+          Compress-Archive -Path "${env:BUNDLE_DIR}\*" -DestinationPath "${env:OUT_ZIP}"
+          Write-Host "Created zip: ${env:OUT_ZIP}"
+          Get-Item "${env:OUT_ZIP}" | Format-List
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-bundle-with-r_lib
+          path: ${{ env.OUT_ZIP }}
+          if-no-files-found: error
