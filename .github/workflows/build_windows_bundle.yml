@@ -133,7 +133,7 @@ jobs:
           $rlib    = Join-Path $bundle "r_lib"
 
           $pkgs = @(
-            "shiny","bs4Dash","DT","dplyr","tidyr","ggplot2","plotly","readr","readxl","lubridate"
+            "shiny","bs4Dash","DT","dplyr","tidyr","ggplot2","plotly","readr","readxl","lubridate", "qs2"
           )
 
           $expr = @"
