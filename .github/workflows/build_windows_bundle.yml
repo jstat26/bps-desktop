@@ -146,16 +146,16 @@ jobs:
           $rlib_fs = ($rlib -replace '\\','/')
 
           $expr = @"
-options(repos = c(CRAN = Sys.getenv('R_REPO', unset='https://cloud.r-project.org')))
-.libPaths(c('$rlib_fs', .libPaths()))
-needed <- c('tidyverse')
-missing <- needed[!sapply(needed, requireNamespace, quietly=TRUE)]
-if (length(missing)) {
-  cat('Installing missing:', paste(missing, collapse=', '), '\n')
-  install.packages(missing, dependencies=TRUE)
-}
-cat('Required package check complete.\n')
-"@
+          options(repos = c(CRAN = Sys.getenv('R_REPO', unset='https://cloud.r-project.org')))
+          .libPaths(c('$rlib_fs', .libPaths()))
+          needed <- c('tidyverse')
+          missing <- needed[!sapply(needed, requireNamespace, quietly=TRUE)]
+          if (length(missing)) {
+          cat('Installing missing:', paste(missing, collapse=', '), '\n')
+          install.packages(missing, dependencies=TRUE)
+          }
+          cat('Required package check complete.\n')
+          "@
 
           & $bundleR --vanilla -e $expr
 
@@ -176,14 +176,14 @@ cat('Required package check complete.\n')
           $rlib_fs  = ($rlib -replace '\\','/')
 
           $expr = @"
-options(repos = c(CRAN = Sys.getenv('R_REPO', unset='https://cloud.r-project.org')))
-.libPaths(c('$rlib_fs', .libPaths()))
-cat('LibPaths:\n'); print(.libPaths())
-pkgs <- c($pkgs_r)
-ok <- sapply(pkgs, function(p) suppressWarnings(require(p, character.only=TRUE)))
-cat('\nLoad results:\n'); print(ok)
-if (any(!ok)) quit(status=2)
-"@
+          options(repos = c(CRAN = Sys.getenv('R_REPO', unset='https://cloud.r-project.org')))
+          .libPaths(c('$rlib_fs', .libPaths()))
+          cat('LibPaths:\n'); print(.libPaths())
+          pkgs <- c($pkgs_r)
+          ok <- sapply(pkgs, function(p) suppressWarnings(require(p, character.only=TRUE)))
+          cat('\nLoad results:\n'); print(ok)
+          if (any(!ok)) quit(status=2)
+          "@
 
           & $bundleR --vanilla -e $expr
 
