@@ -13,12 +13,13 @@ jobs:
     runs-on: windows-latest
 
     env:
-      # IMPORTANT: must match the folder you want to ship (in your repo)
+      # MUST match the folder you ship in your repo (repo root)
       BUNDLE_DIR: "BPS Windows Desktop 1-2.1"
 
-      # Path to prep_r_lib.R inside that bundle folder (relative to repo root)
+      # Path to prep_r_lib.R inside the bundle folder (relative to repo root)
       PREP_SCRIPT: "BPS Windows Desktop 1-2.1/_BPS_Dashboard_App_Files (do not modify)/prep_r_lib.R"
 
+      # Output zip name (written to repo workspace root)
       OUT_ZIP: "BPS_Windows_Bundle_PortableR_with_r_lib.zip"
 
       # Reliable repo for CI
@@ -33,7 +34,7 @@ jobs:
         with:
           r-version: ${{ github.event.inputs.r_version }}
 
-      - name: Print R version
+      - name: Print runner R version
         shell: pwsh
         run: |
           Rscript -e "cat('Runner R version: ', R.version.string, '\n')"
@@ -50,6 +51,21 @@ jobs:
             exit 1
           }
 
+      - name: Clean macOS artifact files from bundle (if any)
+        shell: pwsh
+        run: |
+          $bundle = (Resolve-Path "${env:BUNDLE_DIR}").Path
+
+          # Remove common macOS junk if it exists
+          $macosx = Join-Path $bundle "__MACOSX"
+          if (Test-Path $macosx) { Remove-Item -Recurse -Force $macosx }
+
+          Get-ChildItem -Path $bundle -Recurse -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq ".DS_Store" -or $_.Name -like "._*" } |
+            ForEach-Object { Remove-Item -Force $_.FullName -ErrorAction SilentlyContinue }
+
+          Write-Host "Cleanup complete."
+
       - name: Bundle portable R runtime into the app folder
         shell: pwsh
         run: |
@@ -59,19 +75,20 @@ jobs:
             exit 1
           }
 
-          $dest = Join-Path "${env:BUNDLE_DIR}" "R"
-          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          $bundle = (Resolve-Path "${env:BUNDLE_DIR}").Path
+          $dest   = Join-Path $bundle "R"
 
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
 
-          # Copy full runtime for reliability
-          Copy-Item -Recurse -Force -Path "$rhome\*" -Destination $dest
+          # Copy the entire R home into .\R\
+          Copy-Item -Recurse -Force -Path $rhome\* -Destination $dest
 
           $rscript = Join-Path $dest "bin\Rscript.exe"
-          if (!(Test-Path $rscript)) {
-            Write-Error "Bundled Rscript not found at: $rscript"
-            exit 1
-          }
+          $rexe    = Join-Path $dest "bin\R.exe"
+
+          if (!(Test-Path $rscript)) { Write-Error "Bundled Rscript not found at: $rscript"; exit 1 }
+          if (!(Test-Path $rexe))    { Write-Error "Bundled R.exe not found at: $rexe"; exit 1 }
 
           Write-Host "Bundled R runtime into: $dest"
           & $rscript -e "cat('Bundled R version: ', R.version.string, '\n')"
@@ -79,19 +96,21 @@ jobs:
       - name: Build shipped r_lib using bundled R
         shell: pwsh
         run: |
-          $bundleR = Join-Path "${env:BUNDLE_DIR}" "R\bin\Rscript.exe"
+          $bundle  = (Resolve-Path "${env:BUNDLE_DIR}").Path
+          $bundleR = Join-Path $bundle "R\bin\Rscript.exe"
           if (!(Test-Path $bundleR)) {
             Write-Error "Bundled Rscript missing: $bundleR"
             exit 1
           }
 
-          $rlib = Join-Path "${env:BUNDLE_DIR}" "r_lib"
-          if (!(Test-Path $rlib)) { New-Item -ItemType Directory -Force -Path $rlib | Out-Null }
+          $rlib = Join-Path $bundle "r_lib"
+          if (Test-Path $rlib) { Remove-Item -Recurse -Force $rlib }
+          New-Item -ItemType Directory -Force -Path $rlib | Out-Null
 
-          # Env vars used by prep_r_lib.R (and/or your launcher)
-          $env:BPS_BUNDLE_DIR = (Resolve-Path "${env:BUNDLE_DIR}").Path
-          $env:BPS_R_LIB      = (Resolve-Path $rlib).Path
-          $env:BPS_DASH_LIB   = (Resolve-Path $rlib).Path
+          # Env vars used by prep_r_lib.R
+          $env:BPS_BUNDLE_DIR = $bundle
+          $env:BPS_R_LIB      = $rlib
+          $env:BPS_DASH_LIB   = $rlib
           $env:R_REPO         = "${env:R_REPO}"
 
           & $bundleR --vanilla "${env:PREP_SCRIPT}"
@@ -109,8 +128,8 @@ jobs:
       - name: Smoke test (load key packages from shipped r_lib using bundled R)
         shell: pwsh
         run: |
-          $bundleR = Join-Path "${env:BUNDLE_DIR}" "R\bin\Rscript.exe"
           $bundle  = (Resolve-Path "${env:BUNDLE_DIR}").Path
+          $bundleR = Join-Path $bundle "R\bin\Rscript.exe"
           $rlib    = Join-Path $bundle "r_lib"
 
           $pkgs = @(
@@ -129,13 +148,13 @@ jobs:
 
           & $bundleR --vanilla -e $expr
 
-      - name: Zip bundle folder (including portable R + r_lib)
+      - name: Create zip (includes the top-level bundle folder)
         shell: pwsh
         run: |
-          if (Test-Path "${env:OUT_ZIP}") {
-            Remove-Item -Force "${env:OUT_ZIP}"
-          }
-          Compress-Archive -Path "${env:BUNDLE_DIR}\*" -DestinationPath "${env:OUT_ZIP}"
+          if (Test-Path "${env:OUT_ZIP}") { Remove-Item -Force "${env:OUT_ZIP}" }
+
+          # Zip the folder itself, so extraction produces "BPS Windows Desktop 1-2.1\..."
+          Compress-Archive -Path "${env:BUNDLE_DIR}" -DestinationPath "${env:OUT_ZIP}"
           Write-Host "Created zip: ${env:OUT_ZIP}"
           Get-Item "${env:OUT_ZIP}" | Format-List
 
