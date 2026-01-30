@@ -129,7 +129,7 @@ required_packages <- c(
   "shinymanager", "blastula", "sodium", "digest", "uuid",
   "data.table", "dplyr", "tidyr", "tibble", "tidyselect",
   "ggplot2", "readr", "stringr", "purrr", "forcats", "magrittr",
-  "htmltools", "glue", "jsonlite",
+  "htmltools", "glue", "jsonlite", "tidyverse",
   "plotly", "ggiraph", "ggtext", "patchwork", "viridis", "scales", "gtools",
   "lubridate", "later", "calendar",
   "qs2", "readxl", "openxlsx",
