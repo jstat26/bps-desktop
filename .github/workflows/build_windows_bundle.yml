@@ -1,26 +1,35 @@
-name: Build Windows Bundle (portable R + r_lib)
+name: Build Windows Bundle (dynamic folder + portable R + r_lib + screenshots + release)
 
 on:
   workflow_dispatch:
     inputs:
+      bundle_dir:
+        description: "Top-level bundle folder in repo root (e.g., BPS Windows Desktop 1-3.1)"
+        required: true
+        default: "BPS Windows Desktop 1-2.1"
       r_version:
         description: "R version to use (e.g., 4.4.2)."
         required: true
         default: "4.4.2"
+      release_tag:
+        description: "Release tag (optional). Leave blank to auto-generate."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
 
 jobs:
   build-windows-bundle:
     runs-on: windows-latest
 
     env:
-      # MUST match the folder you ship in your repo (repo root)
-      BUNDLE_DIR: "BPS Windows Desktop 1-2.1"
+      # Provided at dispatch time
+      BUNDLE_DIR: ${{ github.event.inputs.bundle_dir }}
 
-      # Path to prep_r_lib.R inside the bundle folder (relative to repo root)
-      PREP_SCRIPT: "BPS Windows Desktop 1-2.1/_BPS_Dashboard_App_Files (do not modify)/prep_r_lib.R"
-
-      # Output zip name (written to repo workspace root)
-      OUT_ZIP: "BPS_Windows_Bundle_PortableR_with_r_lib.zip"
+      # Relative paths INSIDE the bundle folder
+      PREP_REL_PATH: "_BPS_Dashboard_App_Files (do not modify)/prep_r_lib.R"
+      APP_REL_PATH: "_BPS_Dashboard_App_Files (do not modify)/app.R"
 
       # Reliable repo for CI
       R_REPO: "https://packagemanager.posit.co/cran/latest"
@@ -39,24 +48,37 @@ jobs:
         run: |
           Rscript -e "cat('Runner R version: ', R.version.string, '\n')"
 
+      - name: Derive script paths + versioned zip name
+        shell: pwsh
+        run: |
+          $bundle = "$env:BUNDLE_DIR"
+          $prep   = Join-Path $bundle "$env:PREP_REL_PATH"
+          $app    = Join-Path $bundle "$env:APP_REL_PATH"
+
+          # Versioned zip name based on folder name
+          $safe = $bundle -replace '[^A-Za-z0-9._-]','-'
+          $zip  = "BPS_Windows_${safe}_PortableR_with_r_lib.zip"
+
+          "PREP_SCRIPT=$prep" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "APP_SCRIPT=$app"   | Out-File -FilePath $env:GITHUB_ENV -Append
+          "OUT_ZIP=$zip"      | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          Write-Host "BUNDLE_DIR : $bundle"
+          Write-Host "PREP_SCRIPT: $prep"
+          Write-Host "APP_SCRIPT : $app"
+          Write-Host "OUT_ZIP    : $zip"
+
       - name: Verify bundle paths exist
         shell: pwsh
         run: |
-          if (!(Test-Path "${env:BUNDLE_DIR}")) {
-            Write-Error "Bundle directory not found: ${env:BUNDLE_DIR}. Update BUNDLE_DIR."
-            exit 1
-          }
-          if (!(Test-Path "${env:PREP_SCRIPT}")) {
-            Write-Error "prep_r_lib.R not found at: ${env:PREP_SCRIPT}. Update PREP_SCRIPT."
-            exit 1
-          }
+          if (!(Test-Path "$env:BUNDLE_DIR"))     { throw "Bundle directory not found: $env:BUNDLE_DIR" }
+          if (!(Test-Path "$env:PREP_SCRIPT"))    { throw "prep_r_lib.R not found at: $env:PREP_SCRIPT" }
+          if (!(Test-Path "$env:APP_SCRIPT"))     { throw "app.R not found at: $env:APP_SCRIPT" }
 
       - name: Clean macOS artifact files from bundle (if any)
         shell: pwsh
         run: |
-          $bundle = (Resolve-Path "${env:BUNDLE_DIR}").Path
-
-          # Remove common macOS junk if it exists
+          $bundle = (Resolve-Path "$env:BUNDLE_DIR").Path
           $macosx = Join-Path $bundle "__MACOSX"
           if (Test-Path $macosx) { Remove-Item -Recurse -Force $macosx }
 
@@ -70,25 +92,20 @@ jobs:
         shell: pwsh
         run: |
           $rhome = Rscript -e "cat(R.home())"
-          if (!(Test-Path $rhome)) {
-            Write-Error "R.home() not found: $rhome"
-            exit 1
-          }
+          if (!(Test-Path $rhome)) { throw "R.home() not found: $rhome" }
 
-          $bundle = (Resolve-Path "${env:BUNDLE_DIR}").Path
+          $bundle = (Resolve-Path "$env:BUNDLE_DIR").Path
           $dest   = Join-Path $bundle "R"
 
           if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
 
-          # Copy the entire R home into .\R\
-          Copy-Item -Recurse -Force -Path $rhome\* -Destination $dest
+          Copy-Item -Recurse -Force -Path "$rhome\*" -Destination $dest
 
           $rscript = Join-Path $dest "bin\Rscript.exe"
           $rexe    = Join-Path $dest "bin\R.exe"
-
-          if (!(Test-Path $rscript)) { Write-Error "Bundled Rscript not found at: $rscript"; exit 1 }
-          if (!(Test-Path $rexe))    { Write-Error "Bundled R.exe not found at: $rexe"; exit 1 }
+          if (!(Test-Path $rscript)) { throw "Bundled Rscript not found at: $rscript" }
+          if (!(Test-Path $rexe))    { throw "Bundled R.exe not found at: $rexe" }
 
           Write-Host "Bundled R runtime into: $dest"
           & $rscript -e "cat('Bundled R version: ', R.version.string, '\n')"
@@ -96,12 +113,9 @@ jobs:
       - name: Build shipped r_lib using bundled R
         shell: pwsh
         run: |
-          $bundle  = (Resolve-Path "${env:BUNDLE_DIR}").Path
+          $bundle  = (Resolve-Path "$env:BUNDLE_DIR").Path
           $bundleR = Join-Path $bundle "R\bin\Rscript.exe"
-          if (!(Test-Path $bundleR)) {
-            Write-Error "Bundled Rscript missing: $bundleR"
-            exit 1
-          }
+          if (!(Test-Path $bundleR)) { throw "Bundled Rscript missing: $bundleR" }
 
           $rlib = Join-Path $bundle "r_lib"
           if (Test-Path $rlib) { Remove-Item -Recurse -Force $rlib }
@@ -111,56 +125,269 @@ jobs:
           $env:BPS_BUNDLE_DIR = $bundle
           $env:BPS_R_LIB      = $rlib
           $env:BPS_DASH_LIB   = $rlib
-          $env:R_REPO         = "${env:R_REPO}"
+          $env:R_REPO         = "$env:R_REPO"
 
-          & $bundleR --vanilla "${env:PREP_SCRIPT}"
+          & $bundleR --vanilla "$env:PREP_SCRIPT"
 
-          # Verify r_lib has content
           $count = (Get-ChildItem $rlib -Directory | Measure-Object).Count
-          if ($count -lt 10) {
-            Write-Error "r_lib looks too small ($count package folders). prep_r_lib.R may be writing to the wrong location."
-            exit 1
-          }
+          if ($count -lt 10) { throw "r_lib looks too small ($count package folders). prep_r_lib.R may be writing to the wrong location." }
 
           Write-Host "r_lib built at: $rlib"
           Get-ChildItem $rlib -Directory | Select-Object -First 25 | ForEach-Object { $_.Name }
 
+      - name: Ensure app-required packages exist (e.g., tidyverse)
+        shell: pwsh
+        run: |
+          $bundle  = (Resolve-Path "$env:BUNDLE_DIR").Path
+          $bundleR = Join-Path $bundle "R\bin\Rscript.exe"
+          $rlib    = Join-Path $bundle "r_lib"
+
+          # Use forward slashes for R
+          $rlib_fs = ($rlib -replace '\\','/')
+
+          $expr = @"
+options(repos = c(CRAN = Sys.getenv('R_REPO', unset='https://cloud.r-project.org')))
+.libPaths(c('$rlib_fs', .libPaths()))
+needed <- c('tidyverse')
+missing <- needed[!sapply(needed, requireNamespace, quietly=TRUE)]
+if (length(missing)) {
+  cat('Installing missing:', paste(missing, collapse=', '), '\n')
+  install.packages(missing, dependencies=TRUE)
+}
+cat('Required package check complete.\n')
+"@
+
+          & $bundleR --vanilla -e $expr
+
       - name: Smoke test (load key packages from shipped r_lib using bundled R)
         shell: pwsh
         run: |
-          $bundle  = (Resolve-Path "${env:BUNDLE_DIR}").Path
+          $bundle  = (Resolve-Path "$env:BUNDLE_DIR").Path
           $bundleR = Join-Path $bundle "R\bin\Rscript.exe"
           $rlib    = Join-Path $bundle "r_lib"
 
           $pkgs = @(
-            "shiny","bs4Dash","DT","dplyr","tidyr","ggplot2","plotly","readr","readxl","lubridate", "qs2"
+            "shiny","bs4Dash","DT",
+            "tidyverse",
+            "dplyr","tidyr","ggplot2","plotly","readr","readxl","lubridate","qs2"
           )
 
+          $pkgs_r   = ($pkgs | ForEach-Object { "'$_'" }) -join ","
+          $rlib_fs  = ($rlib -replace '\\','/')
+
           $expr = @"
-          options(repos = c(CRAN = Sys.getenv('R_REPO', unset='https://cloud.r-project.org')))
-          .libPaths(c(normalizePath('$rlib', winslash='\\\\'), .libPaths()))
-          cat('LibPaths:\\n'); print(.libPaths())
-          pkgs <- c(${($pkgs | ForEach-Object { "'$_'" }) -join ","})
-          ok <- sapply(pkgs, function(p) suppressWarnings(require(p, character.only=TRUE)))
-          cat('\\nLoad results:\\n'); print(ok)
-          if (any(!ok)) quit(status=2)
-          "@
+options(repos = c(CRAN = Sys.getenv('R_REPO', unset='https://cloud.r-project.org')))
+.libPaths(c('$rlib_fs', .libPaths()))
+cat('LibPaths:\n'); print(.libPaths())
+pkgs <- c($pkgs_r)
+ok <- sapply(pkgs, function(p) suppressWarnings(require(p, character.only=TRUE)))
+cat('\nLoad results:\n'); print(ok)
+if (any(!ok)) quit(status=2)
+"@
 
           & $bundleR --vanilla -e $expr
 
-      - name: Create zip (includes the top-level bundle folder)
+      # ---------- Launch + screenshot test ----------
+      - name: Launch Shiny app (background) using bundled R + shipped r_lib
         shell: pwsh
         run: |
-          if (Test-Path "${env:OUT_ZIP}") { Remove-Item -Force "${env:OUT_ZIP}" }
+          $ErrorActionPreference = "Stop"
 
-          # Zip the folder itself, so extraction produces "BPS Windows Desktop 1-2.1\..."
-          Compress-Archive -Path "${env:BUNDLE_DIR}" -DestinationPath "${env:OUT_ZIP}"
-          Write-Host "Created zip: ${env:OUT_ZIP}"
-          Get-Item "${env:OUT_ZIP}" | Format-List
+          $bundle   = (Resolve-Path "$env:BUNDLE_DIR").Path
+          $bundleR  = Join-Path $bundle "R\bin\Rscript.exe"
+          $rlib     = Join-Path $bundle "r_lib"
+          $appPath  = (Resolve-Path "$env:APP_SCRIPT").Path
 
-      - name: Upload artifact
+          # Use forward slashes for R (robust)
+          $rlib_fs = ($rlib -replace '\\','/')
+          $app_fs  = ($appPath -replace '\\','/')
+
+          $port = 3838
+          $bindHost = "127.0.0.1"
+
+          $runFile = Join-Path $env:RUNNER_TEMP "run_shiny.R"
+          $outLog  = Join-Path $env:RUNNER_TEMP "shiny_out.log"
+          $errLog  = Join-Path $env:RUNNER_TEMP "shiny_err.log"
+
+          @(
+            "options(repos = c(CRAN = Sys.getenv('R_REPO', unset='https://cloud.r-project.org')))",
+            ".libPaths(c('$rlib_fs', .libPaths()))",
+            "cat('LibPaths:\n'); print(.libPaths())",
+            "cat('Working dir: ', getwd(), '\n')",
+            "cat('App path: $app_fs\n')",
+            "port <- as.integer($port)",
+            "host <- '$bindHost'",
+            "options(shiny.port = port, shiny.host = host)",
+            "shiny::runApp('$app_fs', host=host, port=port, launch.browser=FALSE)"
+          ) | Set-Content -Encoding UTF8 $runFile
+
+          if (Test-Path $outLog) { Remove-Item -Force $outLog }
+          if (Test-Path $errLog) { Remove-Item -Force $errLog }
+
+          Write-Host "Starting Shiny app..."
+          $p = Start-Process -FilePath $bundleR `
+                -ArgumentList @("--vanilla", $runFile) `
+                -PassThru -WindowStyle Hidden `
+                -RedirectStandardOutput $outLog `
+                -RedirectStandardError  $errLog
+
+          "SHINY_PID=$($p.Id)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Shiny PID=$($p.Id)"
+          Write-Host "stdout log: $outLog"
+          Write-Host "stderr log: $errLog"
+
+          function Test-Url($u) {
+            try {
+              $resp = Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 3 -MaximumRedirection 0
+              return $resp.StatusCode
+            } catch {
+              if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+                return [int]$_.Exception.Response.StatusCode
+              }
+              return $null
+            }
+          }
+
+          $urls = @(
+            "http://127.0.0.1:$port",
+            "http://localhost:$port"
+          )
+
+          # Wait up to 4 minutes (120 * 2s)
+          $ok = $false
+          for ($i=0; $i -lt 120; $i++) {
+            foreach ($u in $urls) {
+              $code = Test-Url $u
+              if ($code) {
+                Write-Host "Probe $u -> HTTP $code"
+                if ($code -ge 200 -and $code -lt 500) { $ok = $true; break }
+              }
+            }
+            if ($ok) { break }
+
+            if ($p.HasExited) { Write-Host "Shiny process exited early."; break }
+            Start-Sleep -Seconds 2
+          }
+
+          if (-not $ok) {
+            Write-Host "---- Shiny process status ----"
+            try { Get-Process -Id $p.Id | Format-List * } catch { Write-Host "Process not running." }
+
+            Write-Host "---- netstat (best-effort) ----"
+            try { netstat -ano | Select-String ":$port" | Select-Object -First 20 | ForEach-Object { $_.Line } } catch {}
+
+            Write-Host "---- shiny stdout (last 200 lines) ----"
+            if (Test-Path $outLog) { Get-Content $outLog -Tail 200 | ForEach-Object { $_ } } else { Write-Host "No stdout log." }
+
+            Write-Host "---- shiny stderr (last 200 lines) ----"
+            if (Test-Path $errLog) { Get-Content $errLog -Tail 200 | ForEach-Object { $_ } } else { Write-Host "No stderr log." }
+
+            throw "Shiny app did not become ready at http://127.0.0.1:$port"
+          }
+
+          Write-Host "Shiny app is responding on port $port"
+
+      - name: Set up Node (for Playwright)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright
+        shell: pwsh
+        run: |
+          npm init -y | Out-Null
+          npm i -D @playwright/test
+          npx playwright install --with-deps chromium
+
+      - name: Screenshot app pages
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $outDir = Join-Path $env:RUNNER_TEMP "app_screens"
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+          $testFile = Join-Path $env:RUNNER_TEMP "shot.spec.js"
+          $outEsc = $outDir -replace '\\','\\\\'
+
+          $js = @(
+            "const { test } = require('@playwright/test');",
+            "test('screenshots', async ({ page }) => {",
+            "  page.setDefaultTimeout(60000);",
+            "  await page.goto('http://127.0.0.1:3838', { waitUntil: 'networkidle' });",
+            "  await page.waitForTimeout(3000);",
+            "  await page.screenshot({ path: '${outEsc}\\\\00_home.png', fullPage: true });",
+            "  const tabs = ['Overview','Attendance','Data Explorer','Student Lookup','Incidents Calendar','Admin'];",
+            "  for (let i = 0; i < tabs.length; i++) {",
+            "    const label = tabs[i];",
+            "    const link = page.getByRole('link', { name: label }).first();",
+            "    const text = page.getByText(label, { exact: true }).first();",
+            "    const target = (await link.count()) ? link : text;",
+            "    if (await target.count()) {",
+            "      await target.click();",
+            "      await page.waitForTimeout(3500);",
+            "      await page.screenshot({ path: '${outEsc}\\\\' + String(i+1).padStart(2,'0') + '_' + label.replace(/\\s+/g,'_') + '.png', fullPage: true });",
+            "    }",
+            "  }",
+            "});"
+          )
+          $js | Set-Content -Encoding UTF8 $testFile
+
+          npx playwright test $testFile --reporter=line
+
+      - name: Upload screenshots artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-bundle-portableR-with-r_lib
+          name: app-screenshots
+          path: ${{ runner.temp }}/app_screens
+          if-no-files-found: warn
+
+      - name: Stop Shiny app
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:SHINY_PID) {
+            Write-Host "Stopping Shiny PID=$env:SHINY_PID"
+            Stop-Process -Id $env:SHINY_PID -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Create zip (includes the top-level bundle folder)
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path "$env:OUT_ZIP") { Remove-Item -Force "$env:OUT_ZIP" }
+          Compress-Archive -Path "$env:BUNDLE_DIR" -DestinationPath "$env:OUT_ZIP"
+          Write-Host "Created zip: $env:OUT_ZIP"
+          Get-Item "$env:OUT_ZIP" | Format-List
+
+      - name: Upload artifact (zip)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-bundle-portableR-with_r_lib
           path: ${{ env.OUT_ZIP }}
           if-no-files-found: error
+
+      - name: Compute release tag/name
+        if: success()
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.release_tag }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            $safe = "$env:BUNDLE_DIR" -replace '[^A-Za-z0-9._-]','-'
+            $tag = "windows-$safe-${{ github.run_number }}"
+          }
+          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RELEASE_NAME=Windows Bundle - $env:BUNDLE_DIR (run ${{ github.run_number }})" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Release tag: $tag"
+
+      - name: Create GitHub Release (attach zip)
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_NAME }}
+          generate_release_notes: true
+          files: ${{ env.OUT_ZIP }}
