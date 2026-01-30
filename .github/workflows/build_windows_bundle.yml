@@ -295,7 +295,7 @@ jobs:
           npm i -D @playwright/test
           npx playwright install --with-deps chromium
 
-            - name: Screenshot app pages
+      - name: Screenshot app pages
         continue-on-error: true
         shell: pwsh
         run: |
