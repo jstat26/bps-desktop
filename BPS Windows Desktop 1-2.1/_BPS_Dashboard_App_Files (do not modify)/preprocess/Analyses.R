@@ -1110,4 +1110,4 @@ student_contacts <- contacts %>%
 cache <- mget(.keep, inherits = TRUE)
 
 # Write the cache artifact
-qs2::qsave(cache, OUTPUT_CACHE)
+qs2::qs_save(cache, OUTPUT_CACHE)

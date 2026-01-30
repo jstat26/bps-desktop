@@ -59,7 +59,7 @@ required_packages <- c(
   "readxl","openxlsx","Matrix","glue","jsonlite","htmltools",
   "lubridate","later","calendar",
   "shinymanager","blastula","sodium","digest","uuid",
-  "qs","gtools","truncnorm","fGarch","shinyscreenshot","googledrive"
+  "qs2","gtools","truncnorm","fGarch","shinyscreenshot","googledrive"
 )
 
 message("Installing into: ", local_lib)

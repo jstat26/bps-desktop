@@ -293,7 +293,8 @@ reset_tokens <- reactiveVal(data.frame(token=character(), user=character(), expi
 # cache <- qs::qread("./cache.qs"); list2env(cache, .GlobalEnv)
 
 load_cache <- function(path = "./cache.qs") {
-  cache <- qs2::qread(path)
+  #cache <- qs::qread(path)
+  cache <- qs2::qs_read(path)
   list2env(cache, .GlobalEnv)
   invisible(TRUE)
 }
