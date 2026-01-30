@@ -295,42 +295,41 @@ jobs:
           npm i -D @playwright/test
           npx playwright install --with-deps chromium
 
-      - name: Screenshot app pages
+            - name: Screenshot app pages
         continue-on-error: true
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          $ErrorActionPreference = "Continue"
+
+          $outDir = Join-Path $env:RUNNER_TEMP "app_screens"
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+          $readme = Join-Path $outDir "README.txt"
+          "Screenshot run started: $(Get-Date -Format o)" | Set-Content -Encoding UTF8 $readme
 
           $url = $env:SHINY_URL
           if (-not $url) { $url = "http://127.0.0.1:3838" }
-
-          Write-Host "Shiny URL: $url"
-          Write-Host "Shiny PID: $env:SHINY_PID"
-
-          # Confirm process still running
-          if ($env:SHINY_PID) {
-            try { Get-Process -Id $env:SHINY_PID | Out-Null }
-            catch { Write-Host "WARNING: Shiny PID not running." }
-          }
+          Add-Content $readme "SHINY_URL=$url"
+          Add-Content $readme "SHINY_PID=$env:SHINY_PID"
+          Add-Content $readme "SHINY_OUT_LOG=$env:SHINY_OUT_LOG"
+          Add-Content $readme "SHINY_ERR_LOG=$env:SHINY_ERR_LOG"
 
           function Test-Url($u) {
             try {
               $resp = Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 3 -MaximumRedirection 0
               return $resp.StatusCode
             } catch {
-              if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
-                return [int]$_.Exception.Response.StatusCode
-              }
+              if ($_.Exception.Response -and $_.Exception.Response.StatusCode) { return [int]$_.Exception.Response.StatusCode }
               return $null
             }
           }
 
-          # Wait up to 120s for server
+          # Wait up to 120s
           $ready = $false
           for ($i = 0; $i -lt 60; $i++) {
             $code = Test-Url $url
             if ($code -and $code -ge 200 -and $code -lt 500) {
-              Write-Host "Probe $url -> HTTP $code"
+              Add-Content $readme "Probe OK: HTTP $code"
               $ready = $true
               break
             }
@@ -338,36 +337,22 @@ jobs:
           }
 
           if (-not $ready) {
-            Write-Host "ERROR: Shiny not reachable at $url"
+            Add-Content $readme "ERROR: Shiny not reachable, skipping Playwright."
 
-            Write-Host "---- netstat (best-effort) ----"
+            # Save log tails into artifact folder
             try {
-              if ($url -match ":(\d+)$") {
-                $pnum = $Matches[1]
-                netstat -ano | Select-String ":$pnum" | Select-Object -First 50 | ForEach-Object { $_.Line }
+              if ($env:SHINY_OUT_LOG -and (Test-Path $env:SHINY_OUT_LOG)) {
+                Get-Content $env:SHINY_OUT_LOG -Tail 300 | Set-Content -Encoding UTF8 (Join-Path $outDir "shiny_out_tail.txt")
+              }
+              if ($env:SHINY_ERR_LOG -and (Test-Path $env:SHINY_ERR_LOG)) {
+                Get-Content $env:SHINY_ERR_LOG -Tail 300 | Set-Content -Encoding UTF8 (Join-Path $outDir "shiny_err_tail.txt")
               }
             } catch {}
-
-            Write-Host "---- shiny stdout (last 200 lines) ----"
-            if ($env:SHINY_OUT_LOG -and (Test-Path $env:SHINY_OUT_LOG)) {
-              Get-Content $env:SHINY_OUT_LOG -Tail 200
-            } else {
-              Write-Host "No stdout log found."
-            }
-
-            Write-Host "---- shiny stderr (last 200 lines) ----"
-            if ($env:SHINY_ERR_LOG -and (Test-Path $env:SHINY_ERR_LOG)) {
-              Get-Content $env:SHINY_ERR_LOG -Tail 200
-            } else {
-              Write-Host "No stderr log found."
-            }
 
             exit 0
           }
 
-          $outDir = Join-Path $env:RUNNER_TEMP "app_screens"
-          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-
+          # Write a spec into the workspace so Playwright can find it
           $specDir = Join-Path $env:GITHUB_WORKSPACE ".pw-tests"
           New-Item -ItemType Directory -Force -Path $specDir | Out-Null
 
@@ -398,7 +383,16 @@ jobs:
           ) | Set-Content -Encoding UTF8 $testFile
 
           Set-Location $env:GITHUB_WORKSPACE
-          npx playwright test ".pw-tests/shot.spec.js" --reporter=line || exit 0
+
+          # Run Playwright; if it fails, capture a message for the artifact
+          try {
+            npx playwright test ".pw-tests/shot.spec.js" --reporter=line
+            Add-Content $readme "Playwright completed."
+          } catch {
+            Add-Content $readme "ERROR: Playwright failed."
+            $_ | Out-String | Set-Content -Encoding UTF8 (Join-Path $outDir "playwright_error.txt")
+            exit 0
+          }
 
       - name: Upload screenshots artifact
         if: always()
