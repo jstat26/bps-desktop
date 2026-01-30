@@ -59,7 +59,7 @@ required_packages <- c(
   "DT","plotly","ggiraph","ggtext","patchwork","viridis","scales","gridExtra",
   "data.table","dplyr","tidyr","tibble","tidyselect","purrr","stringr","ggplot2","readr","forcats","magrittr",
   "readxl","openxlsx","Matrix","glue","jsonlite","htmltools",
-  "lubridate","later","calendar", "tidyverse",
+  "lubridate","later","calendar",
   "shinymanager","blastula","sodium","digest","uuid",
   "qs2","gtools","truncnorm","fGarch","shinyscreenshot","googledrive"
 )
