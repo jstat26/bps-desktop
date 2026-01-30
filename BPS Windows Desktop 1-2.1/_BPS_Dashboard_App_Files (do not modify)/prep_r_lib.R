@@ -25,6 +25,8 @@ if (is.na(local_lib) || !nzchar(local_lib)) {
   local_lib <- Sys.getenv("BPS_DASH_LIB", unset = NA_character_)
 }
 if (is.na(local_lib) || !nzchar(local_lib)) {
+  # Default: sibling r_lib at the bundle root
+  # (prep_r_lib.R lives in: <BUNDLE_DIR>/_BPS_Dashboard_App_Files (do not modify)/prep_r_lib.R)
   local_lib <- file.path(script_dir, "..", "r_lib")
 }
 
@@ -40,13 +42,13 @@ options(timeout = 600)
 # ---- Windows: force binaries only ----
 if (.Platform$OS.type == "windows") {
   options(pkgType = "win.binary")
+  # wininet is deprecated but leaving this doesn't break; you can remove if you want
   try(options(download.file.method = "wininet"), silent = TRUE)
 }
 
 # Use your workflow env if provided, else fall back
 repo1 <- Sys.getenv("R_REPO", unset = "https://packagemanager.posit.co/cran/latest")
 
-# IMPORTANT: Put CRAN *second* as a fallback, but we will force binaries anyway on Windows
 options(repos = c(
   CRAN  = repo1,
   CRAN2 = "https://cloud.r-project.org"
@@ -74,11 +76,9 @@ missing <- setdiff(required_packages, installed)
 install_with_log <- function(pkgs) {
   if (!length(pkgs)) return(invisible(TRUE))
   
-  # Capture warnings so they show in GH Actions logs
   w <- character(0)
   withCallingHandlers(
     {
-      # On Windows we force binaries
       if (.Platform$OS.type == "windows") {
         install.packages(pkgs, lib = local_lib, dependencies = TRUE, type = "win.binary")
       } else {
@@ -95,83 +95,15 @@ install_with_log <- function(pkgs) {
     message("---- INSTALL WARNINGS (first 200) ----")
     print(head(unique(w), 200))
   }
+  
   invisible(TRUE)
 }
 
-# ---- install everything except qs first (qs gets special handling) ----
+# ---- install missing ----
 if (length(missing)) {
   message("Missing packages (", length(missing), "): ", paste(missing, collapse = ", "))
-  missing_no_qs <- setdiff(missing, "qs")
-  install_with_log(missing_no_qs)
+  install_with_log(missing)
 }
-
-# ---- install qs explicitly with retries + binary-only ----
-install_qs_binary <- function() {
-  if (requireNamespace("qs", quietly = TRUE, lib.loc = local_lib)) return(TRUE)
-  
-  for (i in 1:4) {
-    message("Installing qs (binary-only) attempt ", i, "/4 ...")
-    ok <- TRUE
-    
-    # capture warnings + errors
-    w <- character(0)
-    res <- tryCatch(
-      withCallingHandlers(
-        {
-          install.packages("qs", lib = local_lib,
-                           dependencies = TRUE,
-                           type = if (.Platform$OS.type == "windows") "win.binary" else getOption("pkgType"))
-          TRUE
-        },
-        warning = function(m) {
-          w <<- c(w, conditionMessage(m))
-          invokeRestart("muffleWarning")
-        }
-      ),
-      error = function(e) {
-        message("qs install ERROR: ", conditionMessage(e))
-        ok <<- FALSE
-        FALSE
-      }
-    )
-    
-    if (length(w)) {
-      message("qs install WARNINGS (first 50):")
-      print(head(w, 50))
-    }
-    
-    # verify it exists
-    inst <- tryCatch(rownames(installed.packages(lib.loc = local_lib)), error = function(e) character(0))
-    if (!("qs" %in% inst)) {
-      message("qs not present in installed.packages() after attempt ", i)
-      ok <- FALSE
-    }
-    
-    # verify it loads (DLL issues show here)
-    if (ok) {
-      ok_load <- tryCatch(
-        {
-          library(qs, lib.loc = local_lib, character.only = TRUE)
-          TRUE
-        },
-        error = function(e) {
-          message("qs installed but failed to load: ", conditionMessage(e))
-          FALSE
-        }
-      )
-      if (ok_load) {
-        message("qs installed and loaded OK")
-        return(TRUE)
-      }
-    }
-    
-    Sys.sleep(5)
-  }
-  
-  stop("FAILED: qs could not be installed/loaded as a binary after 4 attempts.")
-}
-
-install_qs_binary()
 
 # ---- final verification: presence check ----
 installed2 <- tryCatch(rownames(installed.packages(lib.loc = local_lib)),
@@ -180,6 +112,25 @@ missing2 <- setdiff(required_packages, installed2)
 
 if (length(missing2)) {
   message("\nFAILED to install (", length(missing2), "): ", paste(missing2, collapse = ", "))
+  quit(status = 2)
+}
+
+# ---- optional: load-test a few critical packages to catch DLL/runtime issues ----
+load_test <- c("shiny", "bs4Dash", "DT", "plotly", "dplyr", "readr", "readxl", "lubridate", "qs2")
+message("\nLoad test (quick): ", paste(load_test, collapse = ", "))
+
+ok <- sapply(load_test, function(p) {
+  tryCatch({
+    suppressPackageStartupMessages(library(p, character.only = TRUE, lib.loc = local_lib))
+    TRUE
+  }, error = function(e) {
+    message("FAILED to load ", p, ": ", conditionMessage(e))
+    FALSE
+  })
+})
+
+if (any(!ok)) {
+  message("\nFAILED load test packages: ", paste(names(ok)[!ok], collapse = ", "))
   quit(status = 2)
 }
 
