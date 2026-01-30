@@ -1,4 +1,4 @@
-name: Build Windows Bundle (dynamic folder + portable R + r_lib + screenshots + release)
+name: Build Windows Bundle (dynamic folder + portable R + r_lib + healthcheck + release)
 
 on:
   workflow_dispatch:
@@ -55,7 +55,6 @@ jobs:
           $prep   = Join-Path $bundle "$env:PREP_REL_PATH"
           $app    = Join-Path $bundle "$env:APP_REL_PATH"
 
-          # Versioned zip name based on folder name
           $safe = $bundle -replace '[^A-Za-z0-9._-]','-'
           $zip  = "BPS_Windows_${safe}_PortableR_with_r_lib.zip"
 
@@ -71,9 +70,9 @@ jobs:
       - name: Verify bundle paths exist
         shell: pwsh
         run: |
-          if (!(Test-Path "$env:BUNDLE_DIR"))     { throw "Bundle directory not found: $env:BUNDLE_DIR" }
-          if (!(Test-Path "$env:PREP_SCRIPT"))    { throw "prep_r_lib.R not found at: $env:PREP_SCRIPT" }
-          if (!(Test-Path "$env:APP_SCRIPT"))     { throw "app.R not found at: $env:APP_SCRIPT" }
+          if (!(Test-Path "$env:BUNDLE_DIR"))  { throw "Bundle directory not found: $env:BUNDLE_DIR" }
+          if (!(Test-Path "$env:PREP_SCRIPT")) { throw "prep_r_lib.R not found at: $env:PREP_SCRIPT" }
+          if (!(Test-Path "$env:APP_SCRIPT"))  { throw "app.R not found at: $env:APP_SCRIPT" }
 
       - name: Clean macOS artifact files from bundle (if any)
         shell: pwsh
@@ -122,7 +121,6 @@ jobs:
           if (Test-Path $rlib) { Remove-Item -Recurse -Force $rlib }
           New-Item -ItemType Directory -Force -Path $rlib | Out-Null
 
-          # Env vars used by prep_r_lib.R
           $env:BPS_BUNDLE_DIR = $bundle
           $env:BPS_R_LIB      = $rlib
           $env:BPS_DASH_LIB   = $rlib
@@ -142,8 +140,6 @@ jobs:
           $bundle  = (Resolve-Path "$env:BUNDLE_DIR").Path
           $bundleR = Join-Path $bundle "R\bin\Rscript.exe"
           $rlib    = Join-Path $bundle "r_lib"
-
-          # Use forward slashes for R
           $rlib_fs = ($rlib -replace '\\','/')
 
           $expr = @"
@@ -188,7 +184,6 @@ jobs:
 
           & $bundleR --vanilla -e $expr
 
-      # ---------- Launch + screenshot test ----------
       - name: Launch Shiny app (background) using bundled R + shipped r_lib
         shell: pwsh
         run: |
@@ -202,7 +197,6 @@ jobs:
           $rlib_fs = ($rlib -replace '\\','/')
           $app_fs  = ($appPath -replace '\\','/')
 
-          # Pick a random high port to avoid conflicts
           $port = Get-Random -Minimum 10000 -Maximum 20000
           $bindHost = "127.0.0.1"
           $url = "http://$bindHost`:$port"
@@ -233,90 +227,57 @@ jobs:
                 -RedirectStandardOutput $outLog `
                 -RedirectStandardError  $errLog
 
-          "SHINY_PID=$($p.Id)" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "SHINY_URL=$url"     | Out-File -FilePath $env:GITHUB_ENV -Append
-          "SHINY_OUT_LOG=$outLog" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "SHINY_ERR_LOG=$errLog" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "SHINY_PID=$($p.Id)"         | Out-File -FilePath $env:GITHUB_ENV -Append
+          "SHINY_URL=$url"             | Out-File -FilePath $env:GITHUB_ENV -Append
+          "SHINY_OUT_LOG=$outLog"      | Out-File -FilePath $env:GITHUB_ENV -Append
+          "SHINY_ERR_LOG=$errLog"      | Out-File -FilePath $env:GITHUB_ENV -Append
+          "SHINY_PORT=$port"           | Out-File -FilePath $env:GITHUB_ENV -Append
 
           Write-Host "Shiny PID=$($p.Id)"
           Write-Host "stdout log: $outLog"
           Write-Host "stderr log: $errLog"
 
-          function Test-Url($u) {
-            try {
-              $resp = Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 3 -MaximumRedirection 0
-              return $resp.StatusCode
-            } catch {
-              if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
-                return [int]$_.Exception.Response.StatusCode
-              }
-              return $null
-            }
-          }
-
-          # Wait up to 4 minutes
-          $ok = $false
-          for ($i=0; $i -lt 120; $i++) {
-            $code = Test-Url $url
-            if ($code) {
-              Write-Host "Probe $url -> HTTP $code"
-              if ($code -ge 200 -and $code -lt 500) { $ok = $true; break }
-            }
-
-            if ($p.HasExited) { Write-Host "Shiny process exited early."; break }
-            Start-Sleep -Seconds 2
-          }
-
-          if (-not $ok -or $p.HasExited) {
-            Write-Host "---- netstat (best-effort) ----"
-            try { netstat -ano | Select-String ":$port" | Select-Object -First 50 | ForEach-Object { $_.Line } } catch {}
-
-            Write-Host "---- shiny stdout (last 200 lines) ----"
-            if (Test-Path $outLog) { Get-Content $outLog -Tail 200 } else { Write-Host "No stdout log." }
-
-            Write-Host "---- shiny stderr (last 200 lines) ----"
-            if (Test-Path $errLog) { Get-Content $errLog -Tail 200 } else { Write-Host "No stderr log." }
-
-            throw "Shiny app did not stay running / become ready at $url"
-          }
-
-          Write-Host "Shiny app is responding at $url"
-
-      - name: Set up Node (for Playwright)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install Playwright
+      - name: App health check (HTTP probe + save HTML)
         shell: pwsh
         run: |
-          Set-Location $env:GITHUB_WORKSPACE
-          npm init -y | Out-Null
-          npm i -D @playwright/test
-          npx playwright install --with-deps chromium
+          $ErrorActionPreference = "Stop"
 
-      - name: Screenshot app pages (home only, best-effort, no extra probe)
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Continue"
-
-          # Always create output folder so upload-artifact has something
-          $outDir = Join-Path $env:RUNNER_TEMP "app_screens"
+          $outDir = Join-Path $env:RUNNER_TEMP "app_health"
           New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
           $readme = Join-Path $outDir "README.txt"
-          "Screenshot run started: $(Get-Date -Format o)" | Set-Content -Encoding UTF8 $readme
-
-          $url = $env:SHINY_URL
-          if (-not $url) { $url = "http://127.0.0.1:3838" }
-
-          Add-Content $readme "SHINY_URL=$url"
+          "Health check started: $(Get-Date -Format o)" | Set-Content -Encoding UTF8 $readme
+          Add-Content $readme "SHINY_URL=$env:SHINY_URL"
           Add-Content $readme "SHINY_PID=$env:SHINY_PID"
           Add-Content $readme "SHINY_OUT_LOG=$env:SHINY_OUT_LOG"
           Add-Content $readme "SHINY_ERR_LOG=$env:SHINY_ERR_LOG"
 
-          # Best-effort: capture shiny logs no matter what (useful when Playwright fails)
+          function Try-Get($u) {
+            try {
+              return Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 5
+            } catch {
+              return $null
+            }
+          }
+
+          $resp = $null
+          for ($i=0; $i -lt 90; $i++) {
+            $resp = Try-Get $env:SHINY_URL
+            if ($resp -and $resp.StatusCode -ge 200 -and $resp.StatusCode -lt 500) {
+              Add-Content $readme "Probe OK: HTTP $($resp.StatusCode)"
+              break
+            }
+
+            # fail fast if process died
+            if ($env:SHINY_PID) {
+              try { Get-Process -Id ([int]$env:SHINY_PID) | Out-Null }
+              catch { Add-Content $readme "ERROR: Shiny PID exited early."; break }
+            }
+
+            Start-Sleep -Seconds 2
+          }
+
+          # Always capture log tails for debugging
           try {
             if ($env:SHINY_OUT_LOG -and (Test-Path $env:SHINY_OUT_LOG)) {
               Get-Content $env:SHINY_OUT_LOG -Tail 400 | Set-Content -Encoding UTF8 (Join-Path $outDir "shiny_out_tail.txt")
@@ -326,46 +287,29 @@ jobs:
             }
           } catch {}
 
-          # Write a Playwright spec into the workspace so Playwright can find it
-          $specDir = Join-Path $env:GITHUB_WORKSPACE ".pw-tests"
-          New-Item -ItemType Directory -Force -Path $specDir | Out-Null
-
-          $testFile = Join-Path $specDir "home.spec.js"
-          $pngPath  = (Join-Path $outDir "00_home.png") -replace '\\','\\\\'
-          $urlJs    = $url.Replace("\","\\")  # safe for JS string
-
-          @(
-            "const { test } = require('@playwright/test');",
-            "test('home', async ({ page }) => {",
-            "  page.setDefaultTimeout(120000);",
-            "  await page.goto('$urlJs', { waitUntil: 'load', timeout: 120000 });",
-            "  await page.waitForTimeout(8000);",
-            "  await page.screenshot({ path: '$pngPath', fullPage: true });",
-            "});"
-          ) | Set-Content -Encoding UTF8 $testFile
-
-          Set-Location $env:GITHUB_WORKSPACE
-
-          # Run Playwright; if it fails, capture error and continue (best-effort)
-          try {
-            npx playwright --version | Out-File -FilePath (Join-Path $outDir "playwright_version.txt") -Encoding UTF8
-          } catch {}
-
-          try {
-            npx playwright test ".pw-tests/home.spec.js" --reporter=line
-            Add-Content $readme "Playwright completed; screenshot attempted: 00_home.png"
-          } catch {
-            Add-Content $readme "ERROR: Playwright failed; see playwright_error.txt"
-            $_ | Out-String | Set-Content -Encoding UTF8 (Join-Path $outDir "playwright_error.txt")
-            exit 0
+          if (-not $resp) {
+            Add-Content $readme "ERROR: Shiny not reachable."
+            throw "Health check failed: Shiny not reachable at $env:SHINY_URL"
           }
 
-      - name: Upload screenshots artifact
+          # Save HTML for sanity inspection
+          $htmlPath = Join-Path $outDir "home.html"
+          $resp.Content | Set-Content -Encoding UTF8 $htmlPath
+          Add-Content $readme "Saved HTML -> home.html"
+
+          # Very light HTML sanity (do NOT overfit strings)
+          if ($resp.Content -notmatch "<html" -and $resp.Content -notmatch "<!DOCTYPE") {
+            Add-Content $readme "WARNING: HTML did not look like HTML (no <html/doctype found)."
+          }
+
+          Add-Content $readme "Health check complete."
+
+      - name: Upload app health artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: app-screenshots
-          path: ${{ runner.temp }}\app_screens
+          name: app-health
+          path: ${{ runner.temp }}\app_health
           if-no-files-found: warn
 
       - name: Stop Shiny app
