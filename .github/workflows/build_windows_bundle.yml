@@ -290,7 +290,7 @@ jobs:
       - name: Install Playwright
         shell: pwsh
         run: |
-          Set-Location $env:RUNNER_TEMP
+          Set-Location $env:GITHUB_WORKSPACE
           npm init -y | Out-Null
           npm i -D @playwright/test
           npx playwright install --with-deps chromium
@@ -392,7 +392,7 @@ jobs:
         with:
           name: windows-bundle-portableR-with_r_lib
           path: ${{ env.OUT_ZIP }}
-          if-no-files-found: warn
+          if-no-files-found: error
 
       - name: Compute release tag/name
         if: success()
