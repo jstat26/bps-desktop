@@ -109,6 +109,7 @@ jobs:
 
           Write-Host "Bundled R runtime into: $dest"
           & $rscript -e "cat('Bundled R version: ', R.version.string, '\n')"
+          & $rscript -e "cat('Bundled R.home(): ', R.home(), '\n'); cat('Bundled Rscript: ', Sys.which('Rscript'), '\n')"
 
       - name: Build shipped r_lib using bundled R
         shell: pwsh
@@ -151,8 +152,8 @@ jobs:
           needed <- c('tidyverse')
           missing <- needed[!sapply(needed, requireNamespace, quietly=TRUE)]
           if (length(missing)) {
-          cat('Installing missing:', paste(missing, collapse=', '), '\n')
-          install.packages(missing, dependencies=TRUE)
+            cat('Installing missing:', paste(missing, collapse=', '), '\n')
+            install.packages(missing, dependencies=TRUE)
           }
           cat('Required package check complete.\n')
           "@
@@ -198,12 +199,13 @@ jobs:
           $rlib     = Join-Path $bundle "r_lib"
           $appPath  = (Resolve-Path "$env:APP_SCRIPT").Path
 
-          # Use forward slashes for R (robust)
           $rlib_fs = ($rlib -replace '\\','/')
           $app_fs  = ($appPath -replace '\\','/')
 
-          $port = 3838
+          # Pick a random high port to avoid conflicts
+          $port = Get-Random -Minimum 10000 -Maximum 20000
           $bindHost = "127.0.0.1"
+          $url = "http://$bindHost`:$port"
 
           $runFile = Join-Path $env:RUNNER_TEMP "run_shiny.R"
           $outLog  = Join-Path $env:RUNNER_TEMP "shiny_out.log"
@@ -224,7 +226,7 @@ jobs:
           if (Test-Path $outLog) { Remove-Item -Force $outLog }
           if (Test-Path $errLog) { Remove-Item -Force $errLog }
 
-          Write-Host "Starting Shiny app..."
+          Write-Host "Starting Shiny app on $url ..."
           $p = Start-Process -FilePath $bundleR `
                 -ArgumentList @("--vanilla", $runFile) `
                 -PassThru -WindowStyle Hidden `
@@ -232,6 +234,10 @@ jobs:
                 -RedirectStandardError  $errLog
 
           "SHINY_PID=$($p.Id)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "SHINY_URL=$url"     | Out-File -FilePath $env:GITHUB_ENV -Append
+          "SHINY_OUT_LOG=$outLog" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "SHINY_ERR_LOG=$errLog" | Out-File -FilePath $env:GITHUB_ENV -Append
+
           Write-Host "Shiny PID=$($p.Id)"
           Write-Host "stdout log: $outLog"
           Write-Host "stderr log: $errLog"
@@ -248,44 +254,33 @@ jobs:
             }
           }
 
-          $urls = @(
-            "http://127.0.0.1:$port",
-            "http://localhost:$port"
-          )
-
-          # Wait up to 4 minutes (120 * 2s)
+          # Wait up to 4 minutes
           $ok = $false
           for ($i=0; $i -lt 120; $i++) {
-            foreach ($u in $urls) {
-              $code = Test-Url $u
-              if ($code) {
-                Write-Host "Probe $u -> HTTP $code"
-                if ($code -ge 200 -and $code -lt 500) { $ok = $true; break }
-              }
+            $code = Test-Url $url
+            if ($code) {
+              Write-Host "Probe $url -> HTTP $code"
+              if ($code -ge 200 -and $code -lt 500) { $ok = $true; break }
             }
-            if ($ok) { break }
 
             if ($p.HasExited) { Write-Host "Shiny process exited early."; break }
             Start-Sleep -Seconds 2
           }
 
-          if (-not $ok) {
-            Write-Host "---- Shiny process status ----"
-            try { Get-Process -Id $p.Id | Format-List * } catch { Write-Host "Process not running." }
-
+          if (-not $ok -or $p.HasExited) {
             Write-Host "---- netstat (best-effort) ----"
-            try { netstat -ano | Select-String ":$port" | Select-Object -First 20 | ForEach-Object { $_.Line } } catch {}
+            try { netstat -ano | Select-String ":$port" | Select-Object -First 50 | ForEach-Object { $_.Line } } catch {}
 
             Write-Host "---- shiny stdout (last 200 lines) ----"
-            if (Test-Path $outLog) { Get-Content $outLog -Tail 200 | ForEach-Object { $_ } } else { Write-Host "No stdout log." }
+            if (Test-Path $outLog) { Get-Content $outLog -Tail 200 } else { Write-Host "No stdout log." }
 
             Write-Host "---- shiny stderr (last 200 lines) ----"
-            if (Test-Path $errLog) { Get-Content $errLog -Tail 200 | ForEach-Object { $_ } } else { Write-Host "No stderr log." }
+            if (Test-Path $errLog) { Get-Content $errLog -Tail 200 } else { Write-Host "No stderr log." }
 
-            throw "Shiny app did not become ready at http://127.0.0.1:$port"
+            throw "Shiny app did not stay running / become ready at $url"
           }
 
-          Write-Host "Shiny app is responding on port $port"
+          Write-Host "Shiny app is responding at $url"
 
       - name: Set up Node (for Playwright)
         uses: actions/setup-node@v4
@@ -295,6 +290,7 @@ jobs:
       - name: Install Playwright
         shell: pwsh
         run: |
+          Set-Location $env:RUNNER_TEMP
           npm init -y | Out-Null
           npm i -D @playwright/test
           npx playwright install --with-deps chromium
@@ -345,7 +341,12 @@ jobs:
             Write-Host "ERROR: Shiny not reachable at $url"
 
             Write-Host "---- netstat (best-effort) ----"
-            try { netstat -ano | Select-String ":3838" | Select-Object -First 50 | ForEach-Object { $_.Line } } catch {}
+            try {
+              if ($url -match ":(\d+)$") {
+                $pnum = $Matches[1]
+                netstat -ano | Select-String ":$pnum" | Select-Object -First 50 | ForEach-Object { $_.Line }
+              }
+            } catch {}
 
             Write-Host "---- shiny stdout (last 200 lines) ----"
             if ($env:SHINY_OUT_LOG -and (Test-Path $env:SHINY_OUT_LOG)) {
@@ -404,7 +405,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: app-screenshots
-          path: ${{ runner.temp }}/app_screens
+          path: ${{ runner.temp }}\app_screens
           if-no-files-found: warn
 
       - name: Stop Shiny app
