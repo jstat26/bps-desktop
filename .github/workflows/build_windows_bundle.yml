@@ -343,8 +343,8 @@ jobs:
           Get-Content $testFile -TotalCount 5 | ForEach-Object { Write-Host $_ }
       
           # Force Playwright to look for this spec file name
-          npx playwright test --test-match "shot\.spec\.js" --reporter=line
-
+          Set-Location $env:GITHUB_WORKSPACE
+          npx playwright test ".pw-tests/shot.spec.js" --reporter=line
 
       - name: Upload screenshots artifact
         if: always()
