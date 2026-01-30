@@ -132,7 +132,7 @@ required_packages <- c(
   "htmltools", "glue", "jsonlite",
   "plotly", "ggiraph", "ggtext", "patchwork", "viridis", "scales", "gtools",
   "lubridate", "later", "calendar",
-  "qs", "readxl", "openxlsx",
+  "qs2", "readxl", "openxlsx",
   "fGarch", "truncnorm", "Matrix", "gridExtra", "shinyscreenshot",
   "Rcpp"
 )

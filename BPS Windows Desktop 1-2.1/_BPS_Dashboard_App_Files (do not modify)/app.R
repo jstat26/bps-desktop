@@ -28,7 +28,7 @@ list.of.packages <- c("shiny", "dplyr", "tidyr", "ggplot2", "scales", "plotly", 
                       "gtools", "fGarch", "stringr", "truncnorm", "openxlsx", "Matrix", "data.table", "grid", 
                       "gridExtra", "shinyscreenshot", "shinydashboard", "DT", "bs4Dash", "shinyWidgets", 
                       "shinymanager", "blastula", "sodium", "digest", "uuid", "glue", "scales", "calendar", 
-                      "ggtext","ggiraph","qs", "googledrive", "jsonlite", "fresh")
+                      "ggtext","ggiraph","qs2", "googledrive", "jsonlite", "fresh")
 #new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
 # Packages are installed by launch_app.R (district-proof launcher)
 missing <- list.of.packages[!vapply(list.of.packages, requireNamespace, logical(1), quietly = TRUE)]
@@ -293,7 +293,7 @@ reset_tokens <- reactiveVal(data.frame(token=character(), user=character(), expi
 # cache <- qs::qread("./cache.qs"); list2env(cache, .GlobalEnv)
 
 load_cache <- function(path = "./cache.qs") {
-  cache <- qs::qread(path)
+  cache <- qs2::qread(path)
   list2env(cache, .GlobalEnv)
   invisible(TRUE)
 }

@@ -19,7 +19,7 @@ library(patchwork)
 library(plotly)
 library(gtools)
 library(viridis)
-library(qs)
+library(qs2)
 
 ####################
 # Load in datasets 
@@ -1110,4 +1110,4 @@ student_contacts <- contacts %>%
 cache <- mget(.keep, inherits = TRUE)
 
 # Write the cache artifact
-qs::qsave(cache, OUTPUT_CACHE)
+qs2::qsave(cache, OUTPUT_CACHE)
