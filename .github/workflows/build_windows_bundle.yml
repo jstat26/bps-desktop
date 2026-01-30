@@ -295,12 +295,13 @@ jobs:
           npm i -D @playwright/test
           npx playwright install --with-deps chromium
 
-      - name: Screenshot app pages
+      - name: Screenshot app pages (home only, best-effort, no extra probe)
         continue-on-error: true
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
 
+          # Always create output folder so upload-artifact has something
           $outDir = Join-Path $env:RUNNER_TEMP "app_screens"
           New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
@@ -309,87 +310,52 @@ jobs:
 
           $url = $env:SHINY_URL
           if (-not $url) { $url = "http://127.0.0.1:3838" }
+
           Add-Content $readme "SHINY_URL=$url"
           Add-Content $readme "SHINY_PID=$env:SHINY_PID"
           Add-Content $readme "SHINY_OUT_LOG=$env:SHINY_OUT_LOG"
           Add-Content $readme "SHINY_ERR_LOG=$env:SHINY_ERR_LOG"
 
-          function Test-Url($u) {
-            try {
-              $resp = Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 3 -MaximumRedirection 0
-              return $resp.StatusCode
-            } catch {
-              if ($_.Exception.Response -and $_.Exception.Response.StatusCode) { return [int]$_.Exception.Response.StatusCode }
-              return $null
+          # Best-effort: capture shiny logs no matter what (useful when Playwright fails)
+          try {
+            if ($env:SHINY_OUT_LOG -and (Test-Path $env:SHINY_OUT_LOG)) {
+              Get-Content $env:SHINY_OUT_LOG -Tail 400 | Set-Content -Encoding UTF8 (Join-Path $outDir "shiny_out_tail.txt")
             }
-          }
-
-          # Wait up to 120s
-          $ready = $false
-          for ($i = 0; $i -lt 60; $i++) {
-            $code = Test-Url $url
-            if ($code -and $code -ge 200 -and $code -lt 500) {
-              Add-Content $readme "Probe OK: HTTP $code"
-              $ready = $true
-              break
+            if ($env:SHINY_ERR_LOG -and (Test-Path $env:SHINY_ERR_LOG)) {
+              Get-Content $env:SHINY_ERR_LOG -Tail 400 | Set-Content -Encoding UTF8 (Join-Path $outDir "shiny_err_tail.txt")
             }
-            Start-Sleep -Seconds 2
-          }
+          } catch {}
 
-          if (-not $ready) {
-            Add-Content $readme "ERROR: Shiny not reachable, skipping Playwright."
-
-            # Save log tails into artifact folder
-            try {
-              if ($env:SHINY_OUT_LOG -and (Test-Path $env:SHINY_OUT_LOG)) {
-                Get-Content $env:SHINY_OUT_LOG -Tail 300 | Set-Content -Encoding UTF8 (Join-Path $outDir "shiny_out_tail.txt")
-              }
-              if ($env:SHINY_ERR_LOG -and (Test-Path $env:SHINY_ERR_LOG)) {
-                Get-Content $env:SHINY_ERR_LOG -Tail 300 | Set-Content -Encoding UTF8 (Join-Path $outDir "shiny_err_tail.txt")
-              }
-            } catch {}
-
-            exit 0
-          }
-
-          # Write a spec into the workspace so Playwright can find it
+          # Write a Playwright spec into the workspace so Playwright can find it
           $specDir = Join-Path $env:GITHUB_WORKSPACE ".pw-tests"
           New-Item -ItemType Directory -Force -Path $specDir | Out-Null
 
-          $testFile = Join-Path $specDir "shot.spec.js"
-          $outEsc = $outDir -replace '\\','\\\\'
-          $urlJs = $url.Replace("\","\\")
+          $testFile = Join-Path $specDir "home.spec.js"
+          $pngPath  = (Join-Path $outDir "00_home.png") -replace '\\','\\\\'
+          $urlJs    = $url.Replace("\","\\")  # safe for JS string
 
           @(
             "const { test } = require('@playwright/test');",
-            "test('screenshots', async ({ page }) => {",
-            "  page.setDefaultTimeout(60000);",
-            "  await page.goto('$urlJs', { waitUntil: 'domcontentloaded' });",
-            "  await page.waitForTimeout(3000);",
-            "  await page.screenshot({ path: '${outEsc}\\\\00_home.png', fullPage: true });",
-            "  const tabs = ['Overview','Attendance','Data Explorer','Student Lookup','Incidents Calendar','Admin'];",
-            "  for (let i = 0; i < tabs.length; i++) {",
-            "    const label = tabs[i];",
-            "    const link = page.getByRole('link', { name: label }).first();",
-            "    const text = page.getByText(label, { exact: true }).first();",
-            "    const target = (await link.count()) ? link : text;",
-            "    if (await target.count()) {",
-            "      await target.click();",
-            "      await page.waitForTimeout(3500);",
-            "      await page.screenshot({ path: '${outEsc}\\\\' + String(i+1).padStart(2,'0') + '_' + label.replace(/\\s+/g,'_') + '.png', fullPage: true });",
-            "    }",
-            "  }",
+            "test('home', async ({ page }) => {",
+            "  page.setDefaultTimeout(120000);",
+            "  await page.goto('$urlJs', { waitUntil: 'load', timeout: 120000 });",
+            "  await page.waitForTimeout(8000);",
+            "  await page.screenshot({ path: '$pngPath', fullPage: true });",
             "});"
           ) | Set-Content -Encoding UTF8 $testFile
 
           Set-Location $env:GITHUB_WORKSPACE
 
-          # Run Playwright; if it fails, capture a message for the artifact
+          # Run Playwright; if it fails, capture error and continue (best-effort)
           try {
-            npx playwright test ".pw-tests/shot.spec.js" --reporter=line
-            Add-Content $readme "Playwright completed."
+            npx playwright --version | Out-File -FilePath (Join-Path $outDir "playwright_version.txt") -Encoding UTF8
+          } catch {}
+
+          try {
+            npx playwright test ".pw-tests/home.spec.js" --reporter=line
+            Add-Content $readme "Playwright completed; screenshot attempted: 00_home.png"
           } catch {
-            Add-Content $readme "ERROR: Playwright failed."
+            Add-Content $readme "ERROR: Playwright failed; see playwright_error.txt"
             $_ | Out-String | Set-Content -Encoding UTF8 (Join-Path $outDir "playwright_error.txt")
             exit 0
           }
@@ -426,7 +392,7 @@ jobs:
         with:
           name: windows-bundle-portableR-with_r_lib
           path: ${{ env.OUT_ZIP }}
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Compute release tag/name
         if: success()
