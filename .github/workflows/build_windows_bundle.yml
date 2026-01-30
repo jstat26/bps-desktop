@@ -304,18 +304,22 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
+      
           $outDir = Join-Path $env:RUNNER_TEMP "app_screens"
           New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-
-          $testFile = Join-Path $env:RUNNER_TEMP "shot.spec.js"
+      
+          # Put the spec in the repo workspace so Playwright finds it
+          $specDir = Join-Path $env:GITHUB_WORKSPACE ".pw-tests"
+          New-Item -ItemType Directory -Force -Path $specDir | Out-Null
+      
+          $testFile = Join-Path $specDir "shot.spec.js"
           $outEsc = $outDir -replace '\\','\\\\'
-
+      
           $js = @(
             "const { test } = require('@playwright/test');",
             "test('screenshots', async ({ page }) => {",
             "  page.setDefaultTimeout(60000);",
-            "  await page.goto('http://127.0.0.1:3838', { waitUntil: 'networkidle' });",
+            "  await page.goto('http://127.0.0.1:3838', { waitUntil: 'domcontentloaded' });",
             "  await page.waitForTimeout(3000);",
             "  await page.screenshot({ path: '${outEsc}\\\\00_home.png', fullPage: true });",
             "  const tabs = ['Overview','Attendance','Data Explorer','Student Lookup','Incidents Calendar','Admin'];",
@@ -333,8 +337,14 @@ jobs:
             "});"
           )
           $js | Set-Content -Encoding UTF8 $testFile
+      
+          # Sanity print
+          Write-Host "Spec written to: $testFile"
+          Get-Content $testFile -TotalCount 5 | ForEach-Object { Write-Host $_ }
+      
+          # Force Playwright to look for this spec file name
+          npx playwright test --test-match "shot\.spec\.js" --reporter=line
 
-          npx playwright test $testFile --reporter=line
 
       - name: Upload screenshots artifact
         if: always()
