@@ -2,6 +2,7 @@
 
 Name "BPS Dashboard"
 OutFile "BPS_Dashboard.exe"
+Icon "bps_dashboard.ico"
 RequestExecutionLevel user
 Unicode True
 
