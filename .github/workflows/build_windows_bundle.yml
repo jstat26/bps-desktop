@@ -187,7 +187,7 @@ jobs:
 
           & $bundleR --vanilla -e $expr
 
-      - name: Launch Shiny app (background) using bundled R + shipped r_lib (HARDENED)
+      - name: Launch Shiny app (background) using bundled R + shipped r_lib (READY handshake)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -206,9 +206,14 @@ jobs:
           $bindHost = "127.0.0.1"
           $url = "http://$bindHost`:$port"
 
-          $runFile = Join-Path $env:RUNNER_TEMP "run_shiny.R"
-          $outLog  = Join-Path $env:RUNNER_TEMP "shiny_out.log"
-          $errLog  = Join-Path $env:RUNNER_TEMP "shiny_err.log"
+          $runFile   = Join-Path $env:RUNNER_TEMP "run_shiny_ready.R"
+          $outLog    = Join-Path $env:RUNNER_TEMP "shiny_out.log"
+          $errLog    = Join-Path $env:RUNNER_TEMP "shiny_err.log"
+          $readyFile = Join-Path $env:RUNNER_TEMP "shiny_READY.txt"
+
+          if (Test-Path $outLog) { Remove-Item -Force $outLog }
+          if (Test-Path $errLog) { Remove-Item -Force $errLog }
+          if (Test-Path $readyFile) { Remove-Item -Force $readyFile }
 
           @"
           options(repos = c(CRAN = Sys.getenv('R_REPO', unset='https://cloud.r-project.org')))
@@ -219,20 +224,14 @@ jobs:
           cat('LibPaths:\n'); print(.libPaths())
           cat('App dir: $appDirFs\n')
 
-          # Ensure working directory is app folder (relative paths!)
           setwd('$appDirFs')
           cat('Working dir: ', getwd(), '\n')
 
-          # Ensure cache.qs exists if app expects it
+          # Ensure cache.qs exists if your app expects it
           cache_path <- file.path(getwd(), 'cache.qs')
           if (!file.exists(cache_path)) {
             cat('cache.qs missing; creating minimal cache.qs at: ', cache_path, '\n')
-            # if qs2 is available, write a tiny cache object; otherwise write an empty file
-            if (requireNamespace('qs2', quietly=TRUE)) {
-              qs2::qsave(list(), cache_path)
-            } else {
-              file.create(cache_path)
-            }
+            if (requireNamespace('qs2', quietly=TRUE)) qs2::qsave(list(), cache_path) else file.create(cache_path)
           } else {
             cat('cache.qs exists at: ', cache_path, '\n')
           }
@@ -241,21 +240,28 @@ jobs:
           host <- '$bindHost'
           options(shiny.port = port, shiny.host = host)
 
+          ready_file <- '$($readyFile -replace '\\','/')'
+          ready_url  <- '$url'
+
           cat('Attempting to start Shiny on ', host, ':', port, '\n', sep='')
+          cat('READY_FILE: ', ready_file, '\n')
+          cat('READY_URL : ', ready_url, '\n')
           cat('--- SHINY LAUNCHING ---\n')
 
-          tryCatch({
-            shiny::runApp(appDir = getwd(), host = host, port = port, launch.browser = FALSE)
-          }, error = function(e) {
-            message('FATAL: Shiny failed to start: ', conditionMessage(e))
-            message('TRACEBACK:')
-            traceback(20)
-            quit(status = 1)
-          })
+          # When Shiny prints "Listening on http://...", write READY file once.
+          withCallingHandlers(
+            shiny::runApp(appDir = getwd(), host = host, port = port, launch.browser = FALSE),
+            message = function(m) {
+              msg <- conditionMessage(m)
+              cat(msg, '\n')
+              if (!file.exists(ready_file) && grepl('Listening on http', msg, fixed=TRUE)) {
+                writeLines(paste0('READY ', ready_url), ready_file)
+                cat('WROTE READY FILE\n')
+              }
+              invokeRestart('muffleMessage')
+            }
+          )
           "@ | Set-Content -Encoding UTF8 $runFile
-
-          if (Test-Path $outLog) { Remove-Item -Force $outLog }
-          if (Test-Path $errLog) { Remove-Item -Force $errLog }
 
           Write-Host "Starting Shiny app on $url ..."
           $p = Start-Process -FilePath $bundleR `
@@ -265,35 +271,28 @@ jobs:
                 -RedirectStandardOutput $outLog `
                 -RedirectStandardError  $errLog
 
-          # export env vars
           "SHINY_PID=$($p.Id)"         | Out-File -FilePath $env:GITHUB_ENV -Append
           "SHINY_URL=$url"             | Out-File -FilePath $env:GITHUB_ENV -Append
           "SHINY_OUT_LOG=$outLog"      | Out-File -FilePath $env:GITHUB_ENV -Append
           "SHINY_ERR_LOG=$errLog"      | Out-File -FilePath $env:GITHUB_ENV -Append
           "SHINY_PORT=$port"           | Out-File -FilePath $env:GITHUB_ENV -Append
+          "SHINY_READY_FILE=$readyFile" | Out-File -FilePath $env:GITHUB_ENV -Append
 
           Write-Host "Shiny PID=$($p.Id)"
+          Write-Host "READY file: $readyFile"
           Write-Host "stdout log: $outLog"
           Write-Host "stderr log: $errLog"
 
-          # FAIL FAST if process dies immediately; dump logs to console
+          # Quick sanity: if it dies instantly, dump logs right now
           Start-Sleep -Seconds 2
-          try {
-            Get-Process -Id $p.Id | Out-Null
-          } catch {
+          try { Get-Process -Id $p.Id | Out-Null }
+          catch {
             Write-Host "ERROR: Shiny process exited immediately."
-            if (Test-Path $outLog) {
-              Write-Host "----- shiny_out.log (tail 200) -----"
-              Get-Content $outLog -Tail 200 | ForEach-Object { Write-Host $_ }
-            }
-            if (Test-Path $errLog) {
-              Write-Host "----- shiny_err.log (tail 200) -----"
-              Get-Content $errLog -Tail 200 | ForEach-Object { Write-Host $_ }
-            }
-            throw "Shiny process exited immediately (before health check). See logs above."
+            if (Test-Path $outLog) { Write-Host "----- shiny_out.log (tail 200) -----"; Get-Content $outLog -Tail 200 | ForEach-Object { Write-Host $_ } }
+            if (Test-Path $errLog) { Write-Host "----- shiny_err.log (tail 200) -----"; Get-Content $errLog -Tail 200 | ForEach-Object { Write-Host $_ } }
+            throw "Shiny process exited immediately."
           }
-
-      - name: App health check (robust HTTP probe) + diagnostics (FIXED)
+      - name: App health check (READY-file handshake)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -306,6 +305,7 @@ jobs:
           Add-Content $readme "SHINY_URL=$env:SHINY_URL"
           Add-Content $readme "SHINY_PID=$env:SHINY_PID"
           Add-Content $readme "SHINY_PORT=$env:SHINY_PORT"
+          Add-Content $readme "SHINY_READY_FILE=$env:SHINY_READY_FILE"
           Add-Content $readme "SHINY_OUT_LOG=$env:SHINY_OUT_LOG"
           Add-Content $readme "SHINY_ERR_LOG=$env:SHINY_ERR_LOG"
 
@@ -313,90 +313,40 @@ jobs:
             try {
               if ($env:SHINY_OUT_LOG -and (Test-Path $env:SHINY_OUT_LOG)) {
                 Get-Content $env:SHINY_OUT_LOG -Tail 800 | Set-Content -Encoding UTF8 (Join-Path $outDir "shiny_out_tail.txt")
-                Write-Host "----- shiny_out.log (tail 300) -----"
-                Get-Content $env:SHINY_OUT_LOG -Tail 300 | ForEach-Object { Write-Host $_ }
               }
               if ($env:SHINY_ERR_LOG -and (Test-Path $env:SHINY_ERR_LOG)) {
                 Get-Content $env:SHINY_ERR_LOG -Tail 800 | Set-Content -Encoding UTF8 (Join-Path $outDir "shiny_err_tail.txt")
-                Write-Host "----- shiny_err.log (tail 300) -----"
-                Get-Content $env:SHINY_ERR_LOG -Tail 300 | ForEach-Object { Write-Host $_ }
               }
             } catch {}
           }
 
-          function Dump-NetworkDiagnostics {
-            try {
-              $port = [int]$env:SHINY_PORT
-              Add-Content $readme "Net diagnostics for port ${port}"
-              Write-Host "----- netstat for port ${port} -----"
-              cmd /c "netstat -ano | findstr :${port}" | Tee-Object -FilePath (Join-Path $outDir "netstat_port.txt")
-              Write-Host "----- tasklist for SHINY_PID $env:SHINY_PID -----"
-              cmd /c "tasklist /FI ""PID eq $env:SHINY_PID""" | Tee-Object -FilePath (Join-Path $outDir "tasklist_pid.txt")
-            } catch {}
-          }
-
-          # Fail fast if process already died
-          try { Get-Process -Id ([int]$env:SHINY_PID) | Out-Null }
-          catch {
-            Add-Content $readme "ERROR: Shiny PID is not running at start of healthcheck."
-            Dump-Logs
-            Dump-NetworkDiagnostics
-            throw "Health check failed: Shiny process not running."
-          }
-
-          $code = $null
-          $lastErr = $null
-
-          # Robust probe loop (up to ~120s)
+          # Wait up to 120s for READY file to appear
+          $ready = $false
           for ($i=0; $i -lt 120; $i++) {
 
-            # If process died, stop immediately
+            # If PID is gone, fail fast
             try { Get-Process -Id ([int]$env:SHINY_PID) | Out-Null }
             catch {
-              Add-Content $readme "ERROR: Shiny PID exited during probe loop."
+              Add-Content $readme "ERROR: Shiny PID not running while waiting for READY file."
               Dump-Logs
-              Dump-NetworkDiagnostics
-              throw "Health check failed: Shiny process exited during probe loop."
+              throw "Health check failed: Shiny process not running."
             }
 
-            $tmpHeaders = Join-Path $env:RUNNER_TEMP "curl_headers.txt"
-            $tmpBody    = Join-Path $env:RUNNER_TEMP "curl_body.html"
-            if (Test-Path $tmpHeaders) { Remove-Item -Force $tmpHeaders }
-            if (Test-Path $tmpBody)    { Remove-Item -Force $tmpBody }
-
-            try {
-              # Use curl.exe because it's very reliable on GH Windows runners
-              # -sS silent+errors, -L follow redirects, -m timeout seconds
-              & curl.exe -sS -L -m 5 -D $tmpHeaders -o $tmpBody $env:SHINY_URL | Out-Null
-
-              if (Test-Path $tmpHeaders) {
-                $hdr = Get-Content $tmpHeaders -Raw
-                if ($hdr -match "HTTP/\d\.\d\s+(\d{3})") { $code = $Matches[1] }
-              }
-            } catch {
-              $lastErr = $_.Exception.Message
-            }
-
-            if ($code) {
-              Add-Content $readme "Probe OK via curl: HTTP $code"
-              Write-Host "Probe OK: HTTP $code"
-
-              if (Test-Path $tmpBody) {
-                Copy-Item -Force $tmpBody (Join-Path $outDir "home.html")
-                Add-Content $readme "Saved HTML -> home.html"
-              }
+            if ($env:SHINY_READY_FILE -and (Test-Path $env:SHINY_READY_FILE)) {
+              $ready = $true
+              $readyText = Get-Content $env:SHINY_READY_FILE -Raw
+              Add-Content $readme "READY_FILE contents: $readyText"
               break
             }
 
             Start-Sleep -Seconds 1
           }
 
-          if (-not $code) {
-            Add-Content $readme "ERROR: Could not fetch $env:SHINY_URL within timeout."
-            if ($lastErr) { Add-Content $readme "Last error: $lastErr" }
-            Dump-Logs
-            Dump-NetworkDiagnostics
-            throw "Health check failed: could not fetch $env:SHINY_URL"
+          Dump-Logs
+
+          Add-Content $readme "READY? $ready"
+          if (-not $ready) {
+            throw "Health check failed: READY file was not written (app may not have reached Listening state)."
           }
 
           Add-Content $readme "Health check complete."
@@ -406,7 +356,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: app-health
-          path: ${{ runner.temp }}\app_health
+          path: |
+            ${{ runner.temp }}\app_health
+            ${{ env.SHINY_READY_FILE }}
+            ${{ env.SHINY_OUT_LOG }}
+            ${{ env.SHINY_ERR_LOG }}
           if-no-files-found: warn
 
       - name: Stop Shiny app
