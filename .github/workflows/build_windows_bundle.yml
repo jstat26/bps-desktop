@@ -292,64 +292,40 @@ jobs:
             if (Test-Path $errLog) { Write-Host "----- shiny_err.log (tail 200) -----"; Get-Content $errLog -Tail 200 | ForEach-Object { Write-Host $_ } }
             throw "Shiny process exited immediately."
           }
-      - name: App health check (READY-file handshake)
+      - name: App startup assertion (log-based)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          $outDir = Join-Path $env:RUNNER_TEMP "app_health"
-          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-
-          $readme = Join-Path $outDir "README.txt"
-          "Health check started: $(Get-Date -Format o)" | Set-Content -Encoding UTF8 $readme
-          Add-Content $readme "SHINY_URL=$env:SHINY_URL"
-          Add-Content $readme "SHINY_PID=$env:SHINY_PID"
-          Add-Content $readme "SHINY_PORT=$env:SHINY_PORT"
-          Add-Content $readme "SHINY_READY_FILE=$env:SHINY_READY_FILE"
-          Add-Content $readme "SHINY_OUT_LOG=$env:SHINY_OUT_LOG"
-          Add-Content $readme "SHINY_ERR_LOG=$env:SHINY_ERR_LOG"
-
-          function Dump-Logs {
-            try {
-              if ($env:SHINY_OUT_LOG -and (Test-Path $env:SHINY_OUT_LOG)) {
-                Get-Content $env:SHINY_OUT_LOG -Tail 800 | Set-Content -Encoding UTF8 (Join-Path $outDir "shiny_out_tail.txt")
-              }
-              if ($env:SHINY_ERR_LOG -and (Test-Path $env:SHINY_ERR_LOG)) {
-                Get-Content $env:SHINY_ERR_LOG -Tail 800 | Set-Content -Encoding UTF8 (Join-Path $outDir "shiny_err_tail.txt")
-              }
-            } catch {}
-          }
-
-          # Wait up to 120s for READY file to appear
-          $ready = $false
-          for ($i=0; $i -lt 120; $i++) {
-
-            # If PID is gone, fail fast
+          # wait up to 60s for "Listening on" to appear in logs
+          $ok = $false
+          for ($i=0; $i -lt 60; $i++) {
+            # if process died, fail and print logs
             try { Get-Process -Id ([int]$env:SHINY_PID) | Out-Null }
             catch {
-              Add-Content $readme "ERROR: Shiny PID not running while waiting for READY file."
-              Dump-Logs
-              throw "Health check failed: Shiny process not running."
+              Write-Host "Shiny PID exited early."
+              if (Test-Path $env:SHINY_OUT_LOG) { Write-Host "----- shiny_out.log (tail 200) -----"; Get-Content $env:SHINY_OUT_LOG -Tail 200 }
+              if (Test-Path $env:SHINY_ERR_LOG) { Write-Host "----- shiny_err.log (tail 200) -----"; Get-Content $env:SHINY_ERR_LOG -Tail 200 }
+              throw "App failed to stay running during startup window."
             }
 
-            if ($env:SHINY_READY_FILE -and (Test-Path $env:SHINY_READY_FILE)) {
-              $ready = $true
-              $readyText = Get-Content $env:SHINY_READY_FILE -Raw
-              Add-Content $readme "READY_FILE contents: $readyText"
-              break
+            # check logs for Listening
+            if (Test-Path $env:SHINY_ERR_LOG) {
+              $tail = Get-Content $env:SHINY_ERR_LOG -Tail 400 -ErrorAction SilentlyContinue | Out-String
+              if ($tail -match "Listening on http") { $ok = $true; break }
             }
 
             Start-Sleep -Seconds 1
           }
 
-          Dump-Logs
-
-          Add-Content $readme "READY? $ready"
-          if (-not $ready) {
-            throw "Health check failed: READY file was not written (app may not have reached Listening state)."
+          if (-not $ok) {
+            Write-Host "Did not see 'Listening on http' in logs."
+            if (Test-Path $env:SHINY_OUT_LOG) { Write-Host "----- shiny_out.log (tail 200) -----"; Get-Content $env:SHINY_OUT_LOG -Tail 200 }
+            if (Test-Path $env:SHINY_ERR_LOG) { Write-Host "----- shiny_err.log (tail 200) -----"; Get-Content $env:SHINY_ERR_LOG -Tail 200 }
+            throw "Startup assertion failed: Shiny never reported Listening state."
           }
 
-          Add-Content $readme "Health check complete."
+          Write-Host "Startup assertion passed: Shiny reported Listening."
 
       - name: Upload app health artifact
         if: always()
