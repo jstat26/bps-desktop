@@ -89,22 +89,62 @@ jobs:
           find "$SRC" -name "._*" -delete || true
           rm -rf "$SRC/__MACOSX" || true
 
-      - name: Build r_lib inside the source app folder (using your prep_r_lib.R)
+      - name: Build r_lib inside the source app folder (forced lib path + diagnostics)
         shell: bash
         run: |
           set -euo pipefail
           cd "$APPDIR"
 
+          # Create local shipped library
           mkdir -p r_lib
-          export R_LIBS_USER="$(pwd)/r_lib"
-          echo "R_LIBS_USER=$R_LIBS_USER"
 
+          # Absolute path to shipped lib
+          RLIB="$(cd r_lib && pwd)"
+          echo "Target shipped r_lib: $RLIB"
+
+          # Force R to use this library FIRST (and often exclusively)
+          export R_LIBS_USER="$RLIB"
+          export R_LIBS="$RLIB"
+
+          # Also set the env vars your prep script likely expects (based on your Windows workflow)
+          export BPS_BUNDLE_DIR="$(cd "$SRC" && pwd)"
+          export BPS_R_LIB="$RLIB"
+          export BPS_DASH_LIB="$RLIB"
+
+          echo "---- Pre-run diagnostics ----"
+          Rscript --vanilla -e 'cat("R_LIBS_USER=", Sys.getenv("R_LIBS_USER"), "\n");
+                                cat("R_LIBS=", Sys.getenv("R_LIBS"), "\n");
+                                cat("BPS_R_LIB=", Sys.getenv("BPS_R_LIB"), "\n");
+                                cat(".libPaths BEFORE:\n"); print(.libPaths())'
+
+          # Run your prep script
           Rscript --vanilla prep_r_lib.R
 
-          COUNT="$(ls -1 r_lib | wc -l | tr -d ' ')"
-          echo "r_lib package folders: $COUNT"
-          [[ "$COUNT" -ge 10 ]] || { echo "r_lib looks too small; prep_r_lib.R may have installed elsewhere."; exit 1; }
+          echo "---- Post-run diagnostics ----"
+          Rscript --vanilla -e 'cat(".libPaths AFTER:\n"); print(.libPaths());
+                                p <- Sys.getenv("R_LIBS_USER");
+                                cat("Installed packages found in R_LIBS_USER:\n");
+                                ip <- installed.packages(lib.loc=p);
+                                cat(nrow(ip), "packages\n");
+                                if (nrow(ip) > 0) print(head(ip[,c("Package","Version")], 30))'
 
+          # Count package folders robustly (top-level dirs under r_lib)
+          COUNT="$(find r_lib -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+          echo "r_lib package folders (top-level): $COUNT"
+
+          # Fallback: if packages went into a nested structure, count deeper
+          if [[ "$COUNT" -lt 10 ]]; then
+            DEEP_COUNT="$(find r_lib -type d -maxdepth 2 -mindepth 2 | wc -l | tr -d ' ')"
+            echo "r_lib package folders (deeper scan): $DEEP_COUNT"
+          fi
+
+          [[ "$COUNT" -ge 10 ]] || { 
+            echo "r_lib looks too small; prep_r_lib.R likely installed to a different library on the runner."
+            echo "Listing r_lib contents:"
+            find r_lib -maxdepth 3 -type d -print
+            exit 1
+          }
+          
       - name: Create .app bundle skeleton
         shell: bash
         run: |
