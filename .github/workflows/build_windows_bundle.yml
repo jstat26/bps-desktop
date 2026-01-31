@@ -54,17 +54,20 @@ jobs:
           $bundle = "$env:BUNDLE_DIR"
           $prep   = Join-Path $bundle "$env:PREP_REL_PATH"
           $app    = Join-Path $bundle "$env:APP_REL_PATH"
+          $appDir = Split-Path -Parent $app
 
           $safe = $bundle -replace '[^A-Za-z0-9._-]','-'
           $zip  = "BPS_Windows_${safe}_PortableR_with_r_lib.zip"
 
           "PREP_SCRIPT=$prep" | Out-File -FilePath $env:GITHUB_ENV -Append
           "APP_SCRIPT=$app"   | Out-File -FilePath $env:GITHUB_ENV -Append
+          "APP_DIR=$appDir"   | Out-File -FilePath $env:GITHUB_ENV -Append
           "OUT_ZIP=$zip"      | Out-File -FilePath $env:GITHUB_ENV -Append
 
           Write-Host "BUNDLE_DIR : $bundle"
           Write-Host "PREP_SCRIPT: $prep"
           Write-Host "APP_SCRIPT : $app"
+          Write-Host "APP_DIR    : $appDir"
           Write-Host "OUT_ZIP    : $zip"
 
       - name: Verify bundle paths exist
@@ -191,11 +194,13 @@ jobs:
 
           $bundle   = (Resolve-Path "$env:BUNDLE_DIR").Path
           $bundleR  = Join-Path $bundle "R\bin\Rscript.exe"
-          $rlib     = Join-Path $bundle "r_lib"
-          $appPath  = (Resolve-Path "$env:APP_SCRIPT").Path
+          if (!(Test-Path $bundleR)) { throw "Bundled Rscript missing: $bundleR" }
 
-          $rlib_fs = ($rlib -replace '\\','/')
-          $app_fs  = ($appPath -replace '\\','/')
+          $rlib     = Join-Path $bundle "r_lib"
+          $appDir   = (Resolve-Path "$env:APP_DIR").Path
+
+          $rlib_fs  = ($rlib -replace '\\','/')
+          $appDirFs = ($appDir -replace '\\','/')
 
           $port = Get-Random -Minimum 10000 -Maximum 20000
           $bindHost = "127.0.0.1"
@@ -205,17 +210,33 @@ jobs:
           $outLog  = Join-Path $env:RUNNER_TEMP "shiny_out.log"
           $errLog  = Join-Path $env:RUNNER_TEMP "shiny_err.log"
 
-          @(
-            "options(repos = c(CRAN = Sys.getenv('R_REPO', unset='https://cloud.r-project.org')))",
-            ".libPaths(c('$rlib_fs', .libPaths()))",
-            "cat('LibPaths:\n'); print(.libPaths())",
-            "cat('Working dir: ', getwd(), '\n')",
-            "cat('App path: $app_fs\n')",
-            "port <- as.integer($port)",
-            "host <- '$bindHost'",
-            "options(shiny.port = port, shiny.host = host)",
-            "shiny::runApp('$app_fs', host=host, port=port, launch.browser=FALSE)"
-          ) | Set-Content -Encoding UTF8 $runFile
+          @"
+          options(repos = c(CRAN = Sys.getenv('R_REPO', unset='https://cloud.r-project.org')))
+          .libPaths(c('$rlib_fs', .libPaths()))
+
+          cat('LibPaths:\n'); print(.libPaths())
+          cat('About to launch Shiny...\n')
+          cat('App dir: $appDirFs\n')
+          cat('Files in app dir (top-level):\n')
+          print(list.files('$appDirFs'))
+          cat('cache.qs exists? ', file.exists(file.path('$appDirFs','cache.qs')), '\n')
+
+          port <- as.integer($port)
+          host <- '$bindHost'
+          options(shiny.port = port, shiny.host = host)
+
+          setwd('$appDirFs')
+          cat('Working dir set to: ', getwd(), '\n')
+
+          tryCatch({
+            shiny::runApp(appDir = '$appDirFs', host = host, port = port, launch.browser = FALSE)
+          }, error = function(e) {
+            message('FATAL: Shiny failed to start: ', conditionMessage(e))
+            message('TRACEBACK:')
+            traceback(3)
+            quit(status = 1)
+          })
+          "@ | Set-Content -Encoding UTF8 $runFile
 
           if (Test-Path $outLog) { Remove-Item -Force $outLog }
           if (Test-Path $errLog) { Remove-Item -Force $errLog }
@@ -237,7 +258,7 @@ jobs:
           Write-Host "stdout log: $outLog"
           Write-Host "stderr log: $errLog"
 
-      - name: App health check (HTTP probe + save HTML)
+      - name: App health check (TCP + HTTP probe + save HTML)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -249,57 +270,89 @@ jobs:
           "Health check started: $(Get-Date -Format o)" | Set-Content -Encoding UTF8 $readme
           Add-Content $readme "SHINY_URL=$env:SHINY_URL"
           Add-Content $readme "SHINY_PID=$env:SHINY_PID"
+          Add-Content $readme "SHINY_PORT=$env:SHINY_PORT"
           Add-Content $readme "SHINY_OUT_LOG=$env:SHINY_OUT_LOG"
           Add-Content $readme "SHINY_ERR_LOG=$env:SHINY_ERR_LOG"
 
+          # --- helper: capture log tails always ---
+          function Save-LogTails {
+            try {
+              if ($env:SHINY_OUT_LOG -and (Test-Path $env:SHINY_OUT_LOG)) {
+                Get-Content $env:SHINY_OUT_LOG -Tail 800 | Set-Content -Encoding UTF8 (Join-Path $outDir "shiny_out_tail.txt")
+              }
+              if ($env:SHINY_ERR_LOG -and (Test-Path $env:SHINY_ERR_LOG)) {
+                Get-Content $env:SHINY_ERR_LOG -Tail 800 | Set-Content -Encoding UTF8 (Join-Path $outDir "shiny_err_tail.txt")
+              }
+            } catch {}
+          }
+
+          # --- Phase 1: wait for TCP listener ---
+          $tcpOk = $false
+          for ($i=0; $i -lt 60; $i++) {
+            # fail fast if process died
+            if ($env:SHINY_PID) {
+              try { Get-Process -Id ([int]$env:SHINY_PID) | Out-Null }
+              catch {
+                Add-Content $readme "ERROR: Shiny PID exited early during TCP wait."
+                Save-LogTails
+                throw "Shiny process exited before port opened."
+              }
+            }
+
+            $tcpOk = Test-NetConnection -ComputerName 127.0.0.1 -Port ([int]$env:SHINY_PORT) -InformationLevel Quiet
+            if ($tcpOk) { break }
+            Start-Sleep -Seconds 1
+          }
+          Add-Content $readme "TCP listening? $tcpOk"
+          if (-not $tcpOk) {
+            Save-LogTails
+            throw "Health check failed: port $env:SHINY_PORT never opened."
+          }
+
+          # --- Phase 2: HTTP probe ---
           function Try-Get($u) {
             try {
               return Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 5
             } catch {
+              # sometimes it's useful to at least record a status code if present
               return $null
             }
           }
 
           $resp = $null
-          for ($i=0; $i -lt 90; $i++) {
+          for ($i=0; $i -lt 60; $i++) {
             $resp = Try-Get $env:SHINY_URL
-            if ($resp -and $resp.StatusCode -ge 200 -and $resp.StatusCode -lt 500) {
-              Add-Content $readme "Probe OK: HTTP $($resp.StatusCode)"
-              break
-            }
+            if ($resp -and $resp.StatusCode -lt 500) { break }
 
             # fail fast if process died
             if ($env:SHINY_PID) {
               try { Get-Process -Id ([int]$env:SHINY_PID) | Out-Null }
-              catch { Add-Content $readme "ERROR: Shiny PID exited early."; break }
+              catch {
+                Add-Content $readme "ERROR: Shiny PID exited early during HTTP probe."
+                Save-LogTails
+                throw "Shiny process exited before HTTP probe succeeded."
+              }
             }
 
-            Start-Sleep -Seconds 2
+            Start-Sleep -Seconds 1
           }
 
-          # Always capture log tails for debugging
-          try {
-            if ($env:SHINY_OUT_LOG -and (Test-Path $env:SHINY_OUT_LOG)) {
-              Get-Content $env:SHINY_OUT_LOG -Tail 400 | Set-Content -Encoding UTF8 (Join-Path $outDir "shiny_out_tail.txt")
-            }
-            if ($env:SHINY_ERR_LOG -and (Test-Path $env:SHINY_ERR_LOG)) {
-              Get-Content $env:SHINY_ERR_LOG -Tail 400 | Set-Content -Encoding UTF8 (Join-Path $outDir "shiny_err_tail.txt")
-            }
-          } catch {}
+          Save-LogTails
 
           if (-not $resp) {
-            Add-Content $readme "ERROR: Shiny not reachable."
-            throw "Health check failed: Shiny not reachable at $env:SHINY_URL"
+            Add-Content $readme "ERROR: HTTP probe failed / no response object."
+            throw "Health check failed: no HTTP response from $env:SHINY_URL"
           }
+
+          Add-Content $readme "HTTP status: $($resp.StatusCode)"
 
           # Save HTML for sanity inspection
           $htmlPath = Join-Path $outDir "home.html"
           $resp.Content | Set-Content -Encoding UTF8 $htmlPath
           Add-Content $readme "Saved HTML -> home.html"
 
-          # Very light HTML sanity (do NOT overfit strings)
           if ($resp.Content -notmatch "<html" -and $resp.Content -notmatch "<!DOCTYPE") {
-            Add-Content $readme "WARNING: HTML did not look like HTML (no <html/doctype found)."
+            Add-Content $readme "WARNING: Response did not look like HTML."
           }
 
           Add-Content $readme "Health check complete."
