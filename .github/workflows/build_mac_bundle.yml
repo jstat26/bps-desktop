@@ -161,6 +161,7 @@ jobs:
           <dict>
             <key>CFBundleDevelopmentRegion</key><string>English</string>
             <key>CFBundleExecutable</key><string>launcher</string>
+            <key>CFBundleIconFile</key><string>AppIcon</string>
             <key>CFBundleIdentifier</key><string>org.bps.analytics.dashboard</string>
             <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
             <key>CFBundleName</key><string>${APP_NAME}</string>
