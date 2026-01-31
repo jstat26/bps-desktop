@@ -187,11 +187,26 @@ jobs:
 
           & $bundleR --vanilla -e $expr
 
-      - name: Install NSIS
+      - name: Install NSIS (reliable)
         shell: pwsh
         run: |
-          choco install nsis -y
-          makensis /VERSION
+          $ErrorActionPreference = "Stop"
+
+          choco install nsis -y --no-progress
+
+          $mk = "C:\Program Files (x86)\NSIS\makensis.exe"
+          if (!(Test-Path $mk)) {
+            # Some installs land here, or choco didn't register Program Files path yet
+            $mk = "C:\ProgramData\chocolatey\lib\nsis\tools\makensis.exe"
+          }
+
+          if (!(Test-Path $mk)) {
+            throw "makensis.exe not found. Looked in Program Files and choco tools."
+          }
+
+          & $mk /VERSION
+          "MAKENSIS=$mk" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Using makensis at: $mk"
 
       - name: Verify windows_launcher.nsi exists
         shell: pwsh
@@ -201,9 +216,12 @@ jobs:
       - name: Build Windows launcher EXE (single icon)
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $bundle = "$env:BUNDLE_DIR"
 
-          makensis /DBUNDLE_DIR="$bundle" windows_launcher.nsi
+          if (!(Test-Path $env:MAKENSIS)) { throw "MAKENSIS not set or not found: $env:MAKENSIS" }
+
+          & $env:MAKENSIS /DBUNDLE_DIR="$bundle" windows_launcher.nsi
 
           if (!(Test-Path ".\BPS_Dashboard.exe")) {
             throw "Expected NSIS output .\BPS_Dashboard.exe not found. Ensure windows_launcher.nsi has: OutFile `"BPS_Dashboard.exe`""
