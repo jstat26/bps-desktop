@@ -193,13 +193,22 @@ jobs:
           choco install nsis -y
           makensis /VERSION
 
+      - name: Verify windows_launcher.nsi exists
+        shell: pwsh
+        run: |
+          if (!(Test-Path "windows_launcher.nsi")) { throw "windows_launcher.nsi not found in repo root." }
+
       - name: Build Windows launcher EXE (single icon)
         shell: pwsh
         run: |
           $bundle = "$env:BUNDLE_DIR"
+
           makensis /DBUNDLE_DIR="$bundle" windows_launcher.nsi
 
-          # Put the EXE inside the bundle folder so it ends up in the zip
+          if (!(Test-Path ".\BPS_Dashboard.exe")) {
+            throw "Expected NSIS output .\BPS_Dashboard.exe not found. Ensure windows_launcher.nsi has: OutFile `"BPS_Dashboard.exe`""
+          }
+
           Move-Item -Force ".\BPS_Dashboard.exe" (Join-Path $bundle "BPS Dashboard.exe")
           Write-Host "Launcher created at: $bundle\BPS Dashboard.exe"
 
