@@ -1,0 +1,241 @@
+name: Build Mac .app Bundle (self-contained R + r_lib)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_folder:
+        description: "Folder in repo that contains _BPS_Dashboard_App_Files (do not modify) (e.g., 'BPS Mac Desktop 2.0')"
+        required: true
+        default: "BPS Mac Desktop 2.0"
+      app_name:
+        description: "App name (will produce <app_name>.app)"
+        required: true
+        default: "BPS Analytics Dashboard"
+      r_lib_dirname:
+        description: "Name of the local R library folder to create inside the .app (default: r_lib)"
+        required: true
+        default: "r_lib"
+
+jobs:
+  build-mac-app:
+    runs-on: macos-13
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Validate source structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="${{ inputs.source_folder }}"
+          APPDIR="$SRC/_BPS_Dashboard_App_Files (do not modify)"
+
+          if [[ ! -d "$SRC" ]]; then
+            echo "ERROR: source_folder '$SRC' not found in repo."
+            ls -la
+            exit 1
+          fi
+
+          if [[ ! -d "$APPDIR" ]]; then
+            echo "ERROR: Expected '$APPDIR' but it does not exist."
+            find "$SRC" -maxdepth 2 -type d -print
+            exit 1
+          fi
+
+          if [[ ! -f "$APPDIR/app.R" ]]; then
+            echo "ERROR: Expected '$APPDIR/app.R' but it does not exist."
+            ls -la "$APPDIR"
+            exit 1
+          fi
+
+          if [[ ! -f "$APPDIR/launch_app.R" ]]; then
+            echo "ERROR: Expected '$APPDIR/launch_app.R' but it does not exist."
+            ls -la "$APPDIR"
+            exit 1
+          fi
+
+          echo "OK: Found source app folder at: $APPDIR"
+
+      - name: Ensure R is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          which R
+          R --version
+
+      - name: Build r_lib using your prep_r_lib.R (inside source folder)
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="${{ inputs.source_folder }}"
+          APPDIR="$SRC/_BPS_Dashboard_App_Files (do not modify)"
+          cd "$APPDIR"
+
+          # Create a local r_lib alongside app files (like your existing approach)
+          mkdir -p "${{ inputs.r_lib_dirname }}"
+
+          # Run your prep script to install packages into that local library.
+          # We set R_LIBS_USER so installs go into the local r_lib.
+          export R_LIBS_USER="$(pwd)/${{ inputs.r_lib_dirname }}"
+          echo "R_LIBS_USER=$R_LIBS_USER"
+
+          # If your prep_r_lib.R expects working dir = app folder, this is correct.
+          Rscript prep_r_lib.R
+
+          echo "Installed packages in local lib:"
+          Rscript -e 'ip <- installed.packages(lib.loc = Sys.getenv("R_LIBS_USER")); cat(nrow(ip), "packages installed\n")'
+
+      - name: Create .app bundle skeleton
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_NAME="${{ inputs.app_name }}"
+          OUT="dist"
+          APP="$OUT/$APP_NAME.app"
+
+          rm -rf "$OUT"
+          mkdir -p "$APP/Contents/MacOS" \
+                   "$APP/Contents/Resources" \
+                   "$APP/Contents/Frameworks"
+
+          # Minimal Info.plist
+          cat > "$APP/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key><string>English</string>
+            <key>CFBundleExecutable</key><string>launcher</string>
+            <key>CFBundleIdentifier</key><string>org.bps.analytics.dashboard</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+            <key>CFBundleName</key><string>__APP_NAME__</string>
+            <key>CFBundleDisplayName</key><string>__APP_NAME__</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>2.0</string>
+            <key>CFBundleVersion</key><string>2.0</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+
+          # Replace placeholder with actual app name
+          perl -0777 -i -pe "s/__APP_NAME__/${APP_NAME}/g" "$APP/Contents/Info.plist"
+
+      - name: Copy your Shiny app files into the .app
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="${{ inputs.source_folder }}"
+          APPDIR="$SRC/_BPS_Dashboard_App_Files (do not modify)"
+          APP_NAME="${{ inputs.app_name }}"
+          APP="dist/$APP_NAME.app"
+
+          # Put the whole app folder (app.R, launch_app.R, www, etc.) inside Resources/app
+          mkdir -p "$APP/Contents/Resources/app"
+          rsync -a --delete "$APPDIR/" "$APP/Contents/Resources/app/"
+
+      - name: Bundle the system R framework into the .app (self-contained R)
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_NAME="${{ inputs.app_name }}"
+          APP="dist/$APP_NAME.app"
+
+          # GitHub macOS runners have R.framework at /Library/Frameworks/R.framework
+          if [[ ! -d "/Library/Frameworks/R.framework" ]]; then
+            echo "ERROR: /Library/Frameworks/R.framework not found on runner."
+            ls -la /Library/Frameworks || true
+            exit 1
+          fi
+
+          echo "Copying R.framework..."
+          rsync -a "/Library/Frameworks/R.framework" "$APP/Contents/Frameworks/"
+
+      - name: Create launcher executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_NAME="${{ inputs.app_name }}"
+          APP="dist/$APP_NAME.app"
+          LAUNCHER="$APP/Contents/MacOS/launcher"
+
+          cat > "$LAUNCHER" <<'SH'
+          #!/bin/bash
+          set -euo pipefail
+
+          # Resolve .app root
+          APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+          RES_DIR="$APP_DIR/Resources"
+          APP_RES_APP="$RES_DIR/app"
+
+          # Use bundled R.framework
+          R_FRAMEWORK="$APP_DIR/Frameworks/R.framework"
+          export R_HOME="$R_FRAMEWORK/Resources"
+          export PATH="$R_FRAMEWORK/Resources/bin:$PATH"
+
+          # Use bundled local library inside the app (created by prep_r_lib.R)
+          export R_LIBS_USER="$APP_RES_APP/r_lib"
+
+          # Logging (optional but helpful)
+          LOG_DIR="$HOME/Library/Logs/${APP_NAME}"
+          mkdir -p "$LOG_DIR"
+          TS="$(date +%Y%m%d_%H%M%S)"
+          LOG_FILE="$LOG_DIR/launch_${TS}.log"
+
+          {
+            echo "APP_DIR=$APP_DIR"
+            echo "R_HOME=$R_HOME"
+            echo "R_LIBS_USER=$R_LIBS_USER"
+            echo "Working dir: $APP_RES_APP"
+            echo "R version:"
+            "$R_FRAMEWORK/Resources/bin/R" --version || true
+            echo "----- launching app -----"
+          } >> "$LOG_FILE" 2>&1
+
+          cd "$APP_RES_APP"
+
+          # Run your existing launch script
+          "$R_FRAMEWORK/Resources/bin/Rscript" "launch_app.R" >> "$LOG_FILE" 2>&1
+          SH
+
+          # Inject app name into launcher for log folder naming
+          perl -0777 -i -pe "s/\\$\\{APP_NAME\\}/${APP_NAME}/g" "$LAUNCHER"
+
+          chmod +x "$LAUNCHER"
+
+      - name: Ad-hoc codesign (reduces some macOS friction)
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_NAME="${{ inputs.app_name }}"
+          APP="dist/$APP_NAME.app"
+
+          # Ad-hoc sign. Not notarized. Helps with some runtime checks.
+          codesign --force --deep --sign - "$APP" || true
+
+          # Quick sanity: show signature
+          codesign -dv --verbose=2 "$APP" || true
+
+      - name: Zip the .app for download
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_NAME="${{ inputs.app_name }}"
+          APP="dist/$APP_NAME.app"
+
+          mkdir -p artifacts
+          # ditto preserves resource forks/metadata better than zip
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "artifacts/$APP_NAME.app.zip"
+
+          echo "Built: artifacts/$APP_NAME.app.zip"
+          ls -lh artifacts
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-app-bundle
+          path: artifacts/*.zip
+          if-no-files-found: error
