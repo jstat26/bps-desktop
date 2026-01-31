@@ -208,10 +208,23 @@ jobs:
           "MAKENSIS=$mk" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Using makensis at: $mk"
 
-      - name: Verify windows_launcher.nsi exists
+      - name: Locate windows_launcher.nsi (auto)
         shell: pwsh
         run: |
-          if (!(Test-Path "windows_launcher.nsi")) { throw "windows_launcher.nsi not found in repo root." }
+          $ErrorActionPreference = "Stop"
+
+          $nsi = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -Filter "windows_launcher.nsi" -File -ErrorAction SilentlyContinue |
+                 Select-Object -First 1
+
+          if (-not $nsi) {
+            Write-Host "Could not find windows_launcher.nsi anywhere. Available .nsi files:"
+            Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -Filter "*.nsi" -File -ErrorAction SilentlyContinue |
+              ForEach-Object { Write-Host $_.FullName }
+            throw "windows_launcher.nsi not found anywhere in repo (commit/push it or fix filename)."
+          }
+
+          "NSI_PATH=$($nsi.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Found NSI at: $($nsi.FullName)"
 
       - name: Build Windows launcher EXE (single icon)
         shell: pwsh
@@ -219,12 +232,18 @@ jobs:
           $ErrorActionPreference = "Stop"
           $bundle = "$env:BUNDLE_DIR"
 
-          if (!(Test-Path $env:MAKENSIS)) { throw "MAKENSIS not set or not found: $env:MAKENSIS" }
+          if (!(Test-Path $env:MAKENSIS)) {
+            throw "MAKENSIS not set or not found: $env:MAKENSIS"
+          }
 
-          & $env:MAKENSIS /DBUNDLE_DIR="$bundle" windows_launcher.nsi
+          if (!(Test-Path $env:NSI_PATH)) {
+            throw "NSI_PATH not set or not found: $env:NSI_PATH"
+          }
+
+          & $env:MAKENSIS /DBUNDLE_DIR="$bundle" "$env:NSI_PATH"
 
           if (!(Test-Path ".\BPS_Dashboard.exe")) {
-            throw "Expected NSIS output .\BPS_Dashboard.exe not found. Ensure windows_launcher.nsi has: OutFile `"BPS_Dashboard.exe`""
+            throw "Expected NSIS output .\BPS_Dashboard.exe not found. Ensure NSI has: OutFile `"BPS_Dashboard.exe`""
           }
 
           Move-Item -Force ".\BPS_Dashboard.exe" (Join-Path $bundle "BPS Dashboard.exe")
