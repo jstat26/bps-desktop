@@ -230,24 +230,37 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $bundle = "$env:BUNDLE_DIR"
+          $bundle = (Resolve-Path "$env:BUNDLE_DIR").Path
 
-          if (!(Test-Path $env:MAKENSIS)) {
-            throw "MAKENSIS not set or not found: $env:MAKENSIS"
+          if (!(Test-Path $env:MAKENSIS)) { throw "MAKENSIS not set or not found: $env:MAKENSIS" }
+          if (!(Test-Path $env:NSI_PATH)) { throw "NSI_PATH not set or not found: $env:NSI_PATH" }
+
+          # NSIS writes OutFile relative to the directory it compiles from (usually the .nsi folder)
+          $nsiPath = (Resolve-Path "$env:NSI_PATH").Path
+          $nsiDir  = Split-Path -Parent $nsiPath
+
+          Write-Host "BUNDLE_DIR (resolved): $bundle"
+          Write-Host "NSI_PATH  (resolved): $nsiPath"
+          Write-Host "NSI_DIR           : $nsiDir"
+
+          # Compile from NSI directory so relative paths behave predictably
+          Push-Location $nsiDir
+          try {
+            & $env:MAKENSIS "/DBUNDLE_DIR=$env:BUNDLE_DIR" "$nsiPath"
+          } finally {
+            Pop-Location
           }
 
-          if (!(Test-Path $env:NSI_PATH)) {
-            throw "NSI_PATH not set or not found: $env:NSI_PATH"
+          # Expect the exe next to the .nsi (because OutFile is relative)
+          $builtExe = Join-Path $nsiDir "BPS_Dashboard.exe"
+          if (!(Test-Path $builtExe)) {
+            throw "Expected NSIS output not found at: $builtExe. Check OutFile in windows_launcher.nsi."
           }
 
-          & $env:MAKENSIS /DBUNDLE_DIR="$bundle" "$env:NSI_PATH"
-
-          if (!(Test-Path ".\BPS_Dashboard.exe")) {
-            throw "Expected NSIS output .\BPS_Dashboard.exe not found. Ensure NSI has: OutFile `"BPS_Dashboard.exe`""
-          }
-
-          Move-Item -Force ".\BPS_Dashboard.exe" (Join-Path $bundle "BPS Dashboard.exe")
-          Write-Host "Launcher created at: $bundle\BPS Dashboard.exe"
+          # Put the launcher into the bundle folder with your friendly name
+          $dest = Join-Path $bundle "BPS Dashboard.exe"
+          Move-Item -Force $builtExe $dest
+          Write-Host "Launcher created at: $dest"
 
       - name: Create zip (includes the top-level bundle folder)
         if: always()
