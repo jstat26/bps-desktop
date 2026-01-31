@@ -174,12 +174,24 @@ jobs:
           </plist>
           PLIST
 
-      - name: Copy dashboard files into .app (Resources/app)
+      - name: Copy dashboard files into .app (match launch_app.R expected layout)
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "dist/$APP_NAME.app/Contents/Resources/app"
-          rsync -a --delete "$APPDIR/" "dist/$APP_NAME.app/Contents/Resources/app/"
+
+          RES="dist/$APP_NAME.app/Contents/Resources"
+          mkdir -p "$RES/_BPS_Dashboard_App_Files (do not modify)"
+          mkdir -p "$RES/r_lib"
+
+          # Copy app code, but EXCLUDE r_lib (we'll place it at Resources/r_lib)
+          rsync -a --delete --exclude "r_lib/" \
+            "$APPDIR/" \
+            "$RES/_BPS_Dashboard_App_Files (do not modify)/"
+
+          # Copy shipped r_lib to Resources/r_lib
+          rsync -a --delete \
+            "$APPDIR/r_lib/" \
+            "$RES/r_lib/"
 
       - name: Bundle R.framework into the .app (robust path)
         shell: bash
