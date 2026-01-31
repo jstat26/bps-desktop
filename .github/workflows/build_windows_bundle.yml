@@ -262,6 +262,20 @@ jobs:
           Move-Item -Force $builtExe $dest
           Write-Host "Launcher created at: $dest"
 
+      - name: Remove windows_launcher.nsi from shipped bundle
+        if: always()
+        shell: pwsh
+        run: |
+          $bundle = (Resolve-Path "$env:BUNDLE_DIR").Path
+          $nsi = Join-Path $bundle "windows_launcher.nsi"
+
+          if (Test-Path $nsi) {
+            Remove-Item -Force $nsi
+            Write-Host "Removed: $nsi"
+          } else {
+            Write-Host "No windows_launcher.nsi found in bundle folder (nothing to remove)."
+          }
+          
       - name: Create zip (includes the top-level bundle folder)
         if: always()
         shell: pwsh
