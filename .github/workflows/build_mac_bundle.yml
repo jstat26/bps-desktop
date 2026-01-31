@@ -225,13 +225,15 @@ jobs:
 
           APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
           RES_DIR="$APP_DIR/Resources"
-          APP_RES_APP="$RES_DIR/app"
 
           R_FRAMEWORK="$APP_DIR/Frameworks/R.framework"
           export R_HOME="$R_FRAMEWORK/Resources"
           export PATH="$R_HOME/bin:$PATH"
 
-          export R_LIBS_USER="$APP_RES_APP/r_lib"
+          # Tell the shared launch_app.R what "bundle root" is on mac
+          export BPS_APP_DIR="$RES_DIR"
+          export BPS_DASH_LIB="$RES_DIR/r_lib"
+          export R_LIBS_USER="$RES_DIR/r_lib"
 
           LOG_DIR="$HOME/Library/Logs/BPS_Analytics_Dashboard"
           mkdir -p "$LOG_DIR"
@@ -240,16 +242,19 @@ jobs:
 
           {
             echo "APP_DIR=$APP_DIR"
+            echo "RES_DIR=$RES_DIR"
             echo "R_HOME=$R_HOME"
+            echo "BPS_APP_DIR=$BPS_APP_DIR"
+            echo "BPS_DASH_LIB=$BPS_DASH_LIB"
             echo "R_LIBS_USER=$R_LIBS_USER"
-            echo "Working dir: $APP_RES_APP"
             echo "R version:"
             R --version || true
             echo "----- launching app -----"
           } >> "$LOG_FILE" 2>&1
 
-          cd "$APP_RES_APP"
-          Rscript --vanilla "launch_app.R" >> "$LOG_FILE" 2>&1
+          "$R_HOME/bin/Rscript" --vanilla \
+            "$RES_DIR/_BPS_Dashboard_App_Files (do not modify)/launch_app.R" \
+            >> "$LOG_FILE" 2>&1
           SH
 
           chmod +x "$LAUNCHER"
