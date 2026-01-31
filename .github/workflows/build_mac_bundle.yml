@@ -217,6 +217,7 @@ jobs:
 
           echo "Installed icon at: $APP_RES/AppIcon.icns"
           ls -lh "$APP_RES/AppIcon.icns"
+          rm -rf AppIcon.iconset || true
 
       - name: Copy dashboard files into .app (match launch_app.R expected layout)
         shell: bash
