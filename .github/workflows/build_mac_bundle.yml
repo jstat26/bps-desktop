@@ -184,7 +184,7 @@ jobs:
           ICON_PNG="$APPDIR/www/BPS-District-Logo.png"
 
           APP_RES="dist/$APP_NAME.app/Contents/Resources"
-          [[ -f "$ICON_PNG" ]] || { echo "Icon PNG not found: $ICON_PNG"; ls -ლა "$APPDIR/www" || true; exit 1; }
+          [[ -f "$ICON_PNG" ]] || { echo "Icon PNG not found: $ICON_PNG"; ls -la "$APPDIR/www" || true; exit 1; }
 
           # Make sure the source is square (icons must be NxN)
           W="$(sips -g pixelWidth  "$ICON_PNG" | tail -n1 | awk '{print $2}')"
