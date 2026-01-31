@@ -187,6 +187,22 @@ jobs:
 
           & $bundleR --vanilla -e $expr
 
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          choco install nsis -y
+          makensis /VERSION
+
+      - name: Build Windows launcher EXE (single icon)
+        shell: pwsh
+        run: |
+          $bundle = "$env:BUNDLE_DIR"
+          makensis /DBUNDLE_DIR="$bundle" windows_launcher.nsi
+
+          # Put the EXE inside the bundle folder so it ends up in the zip
+          Move-Item -Force ".\BPS_Dashboard.exe" (Join-Path $bundle "BPS Dashboard.exe")
+          Write-Host "Launcher created at: $bundle\BPS Dashboard.exe"
+
       - name: Create zip (includes the top-level bundle folder)
         if: always()
         shell: pwsh
