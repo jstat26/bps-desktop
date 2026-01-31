@@ -293,7 +293,7 @@ jobs:
             throw "Shiny process exited immediately (before health check). See logs above."
           }
 
-      - name: App health check (TCP then HTTP) + dump logs on failure
+      - name: App health check (robust HTTP probe) + diagnostics
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -309,63 +309,93 @@ jobs:
           Add-Content $readme "SHINY_OUT_LOG=$env:SHINY_OUT_LOG"
           Add-Content $readme "SHINY_ERR_LOG=$env:SHINY_ERR_LOG"
 
-          function Dump-Logs-ToConsole {
-            if ($env:SHINY_OUT_LOG -and (Test-Path $env:SHINY_OUT_LOG)) {
-              Write-Host "----- shiny_out.log (tail 300) -----"
-              Get-Content $env:SHINY_OUT_LOG -Tail 300 | ForEach-Object { Write-Host $_ }
-              Get-Content $env:SHINY_OUT_LOG -Tail 800 | Set-Content -Encoding UTF8 (Join-Path $outDir "shiny_out_tail.txt")
-            }
-            if ($env:SHINY_ERR_LOG -and (Test-Path $env:SHINY_ERR_LOG)) {
-              Write-Host "----- shiny_err.log (tail 300) -----"
-              Get-Content $env:SHINY_ERR_LOG -Tail 300 | ForEach-Object { Write-Host $_ }
-              Get-Content $env:SHINY_ERR_LOG -Tail 800 | Set-Content -Encoding UTF8 (Join-Path $outDir "shiny_err_tail.txt")
-            }
+          function Dump-Logs {
+            try {
+              if ($env:SHINY_OUT_LOG -and (Test-Path $env:SHINY_OUT_LOG)) {
+                Get-Content $env:SHINY_OUT_LOG -Tail 800 | Set-Content -Encoding UTF8 (Join-Path $outDir "shiny_out_tail.txt")
+                Write-Host "----- shiny_out.log (tail 300) -----"
+                Get-Content $env:SHINY_OUT_LOG -Tail 300 | ForEach-Object { Write-Host $_ }
+              }
+              if ($env:SHINY_ERR_LOG -and (Test-Path $env:SHINY_ERR_LOG)) {
+                Get-Content $env:SHINY_ERR_LOG -Tail 800 | Set-Content -Encoding UTF8 (Join-Path $outDir "shiny_err_tail.txt")
+                Write-Host "----- shiny_err.log (tail 300) -----"
+                Get-Content $env:SHINY_ERR_LOG -Tail 300 | ForEach-Object { Write-Host $_ }
+              }
+            } catch {}
           }
 
-          # Phase 1: wait for TCP port open (up to 90s)
-          $tcpOk = $false
-          for ($i=0; $i -lt 90; $i++) {
+          function Dump-NetworkDiagnostics {
+            try {
+              $port = [int]$env:SHINY_PORT
+              Add-Content $readme "Net diagnostics for port $port:"
+              Write-Host "----- netstat for port $port -----"
+              cmd /c "netstat -ano | findstr :$port" | Tee-Object -FilePath (Join-Path $outDir "netstat_port.txt")
+              Write-Host "----- tasklist for SHINY_PID $env:SHINY_PID -----"
+              cmd /c "tasklist /FI ""PID eq $env:SHINY_PID""" | Tee-Object -FilePath (Join-Path $outDir "tasklist_pid.txt")
+            } catch {}
+          }
+
+          # Fail fast if process already died
+          try { Get-Process -Id ([int]$env:SHINY_PID) | Out-Null }
+          catch {
+            Add-Content $readme "ERROR: Shiny PID is not running at start of healthcheck."
+            Dump-Logs
+            throw "Health check failed: Shiny process not running."
+          }
+
+          $resp = $null
+          $lastErr = $null
+
+          # Robust probe loop (up to ~2 minutes)
+          for ($i=0; $i -lt 120; $i++) {
+            # if process died, stop immediately
             try { Get-Process -Id ([int]$env:SHINY_PID) | Out-Null }
             catch {
-              Add-Content $readme "ERROR: Shiny PID exited during TCP wait."
-              Dump-Logs-ToConsole
-              throw "Shiny process exited before port opened."
+              Add-Content $readme "ERROR: Shiny PID exited during probe loop."
+              Dump-Logs
+              Dump-NetworkDiagnostics
+              throw "Health check failed: Shiny process exited during probe loop."
             }
 
-            $tcpOk = Test-NetConnection -ComputerName 127.0.0.1 -Port ([int]$env:SHINY_PORT) -InformationLevel Quiet
-            if ($tcpOk) { break }
-            Start-Sleep -Seconds 1
-          }
+            # Prefer curl.exe (very reliable on Windows runners)
+            $tmpHeaders = Join-Path $env:RUNNER_TEMP "curl_headers.txt"
+            $tmpBody    = Join-Path $env:RUNNER_TEMP "curl_body.html"
+            if (Test-Path $tmpHeaders) { Remove-Item -Force $tmpHeaders }
+            if (Test-Path $tmpBody)    { Remove-Item -Force $tmpBody }
 
-          Add-Content $readme "TCP listening? $tcpOk"
-          if (-not $tcpOk) {
-            Dump-Logs-ToConsole
-            throw "Health check failed: port $env:SHINY_PORT never opened."
-          }
-
-          # Phase 2: HTTP probe (up to 60s)
-          $resp = $null
-          for ($i=0; $i -lt 60; $i++) {
+            $code = ""
             try {
-              $resp = Invoke-WebRequest -Uri $env:SHINY_URL -UseBasicParsing -TimeoutSec 5
-              if ($resp.StatusCode -lt 500) { break }
+              # -s silent, -S show errors, -L follow redirects, -m timeout seconds
+              cmd /c "curl.exe -sS -L -m 5 -D ""$tmpHeaders"" -o ""$tmpBody"" ""$env:SHINY_URL"" & echo CURL_EXITCODE:%ERRORLEVEL%" | Out-Null
+              $hdr = if (Test-Path $tmpHeaders) { Get-Content $tmpHeaders -Raw } else { "" }
+              if ($hdr -match "HTTP/\d\.\d\s+(\d{3})") { $code = $Matches[1] }
             } catch {
-              $resp = $null
+              $lastErr = $_.Exception.Message
             }
+
+            if ($code) {
+              Add-Content $readme "Probe OK via curl: HTTP $code"
+              Write-Host "Probe OK: HTTP $code"
+              # Save body
+              if (Test-Path $tmpBody) {
+                Copy-Item -Force $tmpBody (Join-Path $outDir "home.html")
+                Add-Content $readme "Saved HTML -> home.html"
+              }
+              break
+            }
+
             Start-Sleep -Seconds 1
           }
 
-          if (-not $resp) {
-            Add-Content $readme "ERROR: No HTTP response from $env:SHINY_URL"
-            Dump-Logs-ToConsole
-            throw "Health check failed: no HTTP response from $env:SHINY_URL"
+          # If no success, dump everything and fail
+          if (-not $code) {
+            Add-Content $readme "ERROR: Could not fetch $env:SHINY_URL within timeout."
+            if ($lastErr) { Add-Content $readme "Last error: $lastErr" }
+            Dump-Logs
+            Dump-NetworkDiagnostics
+            throw "Health check failed: could not fetch $env:SHINY_URL"
           }
 
-          Add-Content $readme "HTTP status: $($resp.StatusCode)"
-
-          $htmlPath = Join-Path $outDir "home.html"
-          $resp.Content | Set-Content -Encoding UTF8 $htmlPath
-          Add-Content $readme "Saved HTML -> home.html"
           Add-Content $readme "Health check complete."
 
       - name: Upload app health artifact
