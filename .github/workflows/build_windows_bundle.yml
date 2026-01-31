@@ -293,7 +293,7 @@ jobs:
             throw "Shiny process exited immediately (before health check). See logs above."
           }
 
-      - name: App health check (robust HTTP probe) + diagnostics
+      - name: App health check (robust HTTP probe) + diagnostics (FIXED)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -327,9 +327,9 @@ jobs:
           function Dump-NetworkDiagnostics {
             try {
               $port = [int]$env:SHINY_PORT
-              Add-Content $readme "Net diagnostics for port $port:"
-              Write-Host "----- netstat for port $port -----"
-              cmd /c "netstat -ano | findstr :$port" | Tee-Object -FilePath (Join-Path $outDir "netstat_port.txt")
+              Add-Content $readme "Net diagnostics for port ${port}"
+              Write-Host "----- netstat for port ${port} -----"
+              cmd /c "netstat -ano | findstr :${port}" | Tee-Object -FilePath (Join-Path $outDir "netstat_port.txt")
               Write-Host "----- tasklist for SHINY_PID $env:SHINY_PID -----"
               cmd /c "tasklist /FI ""PID eq $env:SHINY_PID""" | Tee-Object -FilePath (Join-Path $outDir "tasklist_pid.txt")
             } catch {}
@@ -340,15 +340,17 @@ jobs:
           catch {
             Add-Content $readme "ERROR: Shiny PID is not running at start of healthcheck."
             Dump-Logs
+            Dump-NetworkDiagnostics
             throw "Health check failed: Shiny process not running."
           }
 
-          $resp = $null
+          $code = $null
           $lastErr = $null
 
-          # Robust probe loop (up to ~2 minutes)
+          # Robust probe loop (up to ~120s)
           for ($i=0; $i -lt 120; $i++) {
-            # if process died, stop immediately
+
+            # If process died, stop immediately
             try { Get-Process -Id ([int]$env:SHINY_PID) | Out-Null }
             catch {
               Add-Content $readme "ERROR: Shiny PID exited during probe loop."
@@ -357,18 +359,20 @@ jobs:
               throw "Health check failed: Shiny process exited during probe loop."
             }
 
-            # Prefer curl.exe (very reliable on Windows runners)
             $tmpHeaders = Join-Path $env:RUNNER_TEMP "curl_headers.txt"
             $tmpBody    = Join-Path $env:RUNNER_TEMP "curl_body.html"
             if (Test-Path $tmpHeaders) { Remove-Item -Force $tmpHeaders }
             if (Test-Path $tmpBody)    { Remove-Item -Force $tmpBody }
 
-            $code = ""
             try {
-              # -s silent, -S show errors, -L follow redirects, -m timeout seconds
-              cmd /c "curl.exe -sS -L -m 5 -D ""$tmpHeaders"" -o ""$tmpBody"" ""$env:SHINY_URL"" & echo CURL_EXITCODE:%ERRORLEVEL%" | Out-Null
-              $hdr = if (Test-Path $tmpHeaders) { Get-Content $tmpHeaders -Raw } else { "" }
-              if ($hdr -match "HTTP/\d\.\d\s+(\d{3})") { $code = $Matches[1] }
+              # Use curl.exe because it's very reliable on GH Windows runners
+              # -sS silent+errors, -L follow redirects, -m timeout seconds
+              & curl.exe -sS -L -m 5 -D $tmpHeaders -o $tmpBody $env:SHINY_URL | Out-Null
+
+              if (Test-Path $tmpHeaders) {
+                $hdr = Get-Content $tmpHeaders -Raw
+                if ($hdr -match "HTTP/\d\.\d\s+(\d{3})") { $code = $Matches[1] }
+              }
             } catch {
               $lastErr = $_.Exception.Message
             }
@@ -376,7 +380,7 @@ jobs:
             if ($code) {
               Add-Content $readme "Probe OK via curl: HTTP $code"
               Write-Host "Probe OK: HTTP $code"
-              # Save body
+
               if (Test-Path $tmpBody) {
                 Copy-Item -Force $tmpBody (Join-Path $outDir "home.html")
                 Add-Content $readme "Saved HTML -> home.html"
@@ -387,7 +391,6 @@ jobs:
             Start-Sleep -Seconds 1
           }
 
-          # If no success, dump everything and fail
           if (-not $code) {
             Add-Content $readme "ERROR: Could not fetch $env:SHINY_URL within timeout."
             if ($lastErr) { Add-Content $readme "Last error: $lastErr" }
